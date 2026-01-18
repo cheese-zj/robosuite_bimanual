@@ -1,0 +1,17 @@
+<mujoco model="training_pair_camera">
+    <!-- Camera positioned above the training pair (robots 0 and 1) -->
+    <!-- For front-back configuration, robots 0 and 1 are at y=+0.25 (front side) -->
+    <worldbody>
+        <!-- Birdview camera centered on training pair (robots 0 and 1) -->
+        <camera name="training_pair_view"
+                mode="fixed"
+                pos="0.0 0.25 1.5"
+                quat="0.653 0.271 0.271 0.653"/>
+
+        <!-- Alternative: slightly angled view of training pair -->
+        <camera name="training_pair_angle"
+                mode="fixed"
+                pos="0.0 0.15 1.3"
+                quat="0.707 0.259 0.259 0.655"/>
+    </worldbody>
+</mujoco>

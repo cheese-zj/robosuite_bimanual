@@ -1,0 +1,19 @@
+<mujoco model="cloth_flex">
+    <compiler angle="radian"/>
+    <option timestep="0.002" integrator="implicitfast" solver="CG"/>
+
+    <asset>
+        <texture type="2d" name="cloth_tex" builtin="flat" rgb1="0.8 0.2 0.2" width="64" height="64"/>
+        <material name="cloth_mat" texture="cloth_tex" rgba="0.9 0.3 0.3 1" specular="0.1"/>
+    </asset>
+
+    <worldbody>
+        <body name="cloth_root" pos="0 0 0">
+            <flexcomp name="cloth" type="grid" dim="2" count="9 9 1"
+                      spacing="0.0375 0.0375 0.01" pos="0 0 0.81"
+                      material="cloth_mat" rgba="0.9 0.3 0.3 1" radius="0.001" mass="0.2">
+                <contact contype="1" conaffinity="1"/>
+            </flexcomp>
+        </body>
+    </worldbody>
+</mujoco>

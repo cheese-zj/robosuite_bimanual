@@ -1,0 +1,13 @@
+<mujoco model="two_arm_camera">
+    <!-- Cameras for 2-arm bimanual cloth folding -->
+    <!-- Used for training data collection with parallel robot configuration -->
+    <worldbody>
+        <!-- Main training camera: Birdview centered over table -->
+        <!-- Position: (0, 0, 1.4) - centered over cloth workspace -->
+        <!-- Quaternion: 90-degree rotation for top-down view -->
+        <camera name="bimanual_view"
+                mode="fixed"
+                pos="-0.6 0.0 1.6"
+                quat="0.674705 0.211598 -0.211598 -0.674705"/>
+    </worldbody>
+</mujoco>
