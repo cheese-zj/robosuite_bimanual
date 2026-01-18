@@ -326,6 +326,14 @@ class FourArmClothFold(FourArmEnv):
     def reward(self, action=None):
         return 0.0
 
+    def _check_success(self):
+        """Check if cloth folding task is successful.
+
+        Always returns False - episode termination is controlled by the
+        scripted policy's done flag in collect_scripted.py.
+        """
+        return False
+
     def _pre_action(self, action, policy_step=False):
         super()._pre_action(action, policy_step)
         self._update_grasp_assist(action)

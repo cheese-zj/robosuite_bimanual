@@ -114,7 +114,7 @@ class ScriptedBimanualPolicy:
 class ClothFoldPolicyConfig:
     approach_height: float = 0.02  # Very low approach - just above cloth
     grasp_height: float = 0.0      # At cloth level for contact
-    lift_height: float = 0.02      # Minimal lift - stay within reach
+    lift_height: float = 0.04      # Moderate lift - enough clearance but cloth stays on table
     fold_height: float = 0.10
     retreat_height: float = 0.15   # Height to retreat to after release
     pos_gain: float = 1.0
@@ -131,7 +131,7 @@ class ClothFoldPolicyConfig:
     close_gripper: float = 1.0
     layout: str = "front-back"  # "front-back" or "parallel"
     # Grasp inward offset - target slightly inside corners for reachability
-    grasp_inward_offset: float = 0.05  # Move 5cm toward cloth center (reduced for better vertex capture)
+    grasp_inward_offset: float = 0.02  # Move 2cm toward cloth center (close to true edge)
 
 
 class ScriptedClothFoldPolicy:

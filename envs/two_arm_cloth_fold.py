@@ -415,7 +415,8 @@ class TwoArmClothFold(TwoArmEnv):
     def _check_success(self):
         """Check if cloth folding task is successful.
 
-        Can be extended to check fold quality (e.g., overlap ratio, alignment).
+        Always returns False - episode termination is controlled by the
+        scripted policy's done flag in collect_scripted.py.
         """
         return False
 
