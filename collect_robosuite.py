@@ -24,7 +24,6 @@ import numpy as np
 import robosuite as suite
 from robosuite import load_composite_controller_config
 from robosuite.controllers.composite.composite_controller import WholeBody
-from robosuite.devices.keyboard import Keyboard
 
 
 CameraNames = Optional[Union[str, Sequence[str]]]
@@ -493,7 +492,8 @@ def run_keyboard_collection(
     # Create data collector
     collector = BimanualDataCollector(env, save_dir=save_dir, camera_names=camera_names)
 
-    # Setup keyboard device
+    from robosuite.devices.keyboard import Keyboard
+
     device = Keyboard(env=env, pos_sensitivity=0.05, rot_sensitivity=0.1)
     controls = RecordingControls()
 
