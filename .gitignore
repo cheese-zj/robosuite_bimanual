@@ -47,7 +47,7 @@ Desktop.ini
 # ===============================================
 # Robot Learning Specific (Large Data Files)
 # ===============================================
-data/*                    # Demo data (HDF5 files - typically 22MB+)
+data/                     # Demo data (HDF5 files - typically 22MB+)
 checkpoints/             # Trained models
 *.hdf5                   # HDF5 data files
 *.h5
