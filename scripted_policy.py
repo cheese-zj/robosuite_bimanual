@@ -122,9 +122,9 @@ class ClothFoldPolicyConfig:
     grasp_dist_threshold: float = 0.05  # Increased threshold for easier transitions
     approach_steps: int = 15
     settle_steps: int = 10  # Wait time after reaching position before closing gripper
-    grasp_steps: int = 45  # More time to close gripper and ensure stable grip
+    grasp_steps: int = 25  # Time for gripper to close and vertices to attach
     lift_steps: int = 20
-    fold_steps: int = 30
+    fold_steps: int = 50  # More time for smooth cloth physics during fold
     release_steps: int = 8
     retreat_steps: int = 15  # Steps for retreat phase
     open_gripper: float = -1.0
