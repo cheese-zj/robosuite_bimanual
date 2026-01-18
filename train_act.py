@@ -24,7 +24,7 @@ from dataset import create_dataloaders
 class ACTConfig:
     """ACT model configuration"""
 
-    obs_dim: int = 46  # 23 per arm × 2 arms
+    obs_dim: int = 60  # 30 per arm × 2 arms (now includes joint velocities)
     action_dim: int = 14  # 7 per arm × 2 arms (OSC_POSE)
     hidden_dim: int = 256
     n_heads: int = 8
@@ -34,11 +34,18 @@ class ACTConfig:
     latent_dim: int = 32
     dropout: float = 0.1
     kl_weight: float = 10.0
+    kl_warmup_epochs: int = 50  # Epochs over which to anneal KL weight
+
+    # Vision parameters
+    use_images: bool = False
+    num_cameras: int = 1
+    image_size: int = 224  # ResNet input size
+    freeze_vision_backbone: bool = False
 
 
 class ACTModel(nn.Module):
     """
-    Simplified ACT (Action Chunking with Transformers) model.
+    ACT (Action Chunking with Transformers) model with optional vision support.
 
     For the full implementation, see: https://github.com/tonyzhaozh/act
     """
@@ -47,8 +54,29 @@ class ACTModel(nn.Module):
         super().__init__()
         self.config = config
 
-        # Encoder
+        # Vision encoder (optional)
+        self.vision_encoder = None
+        if config.use_images:
+            from vision_encoder import VisionEncoder
+
+            self.vision_encoder = VisionEncoder(
+                hidden_dim=config.hidden_dim,
+                num_cameras=config.num_cameras,
+                pretrained=True,
+                freeze_backbone=config.freeze_vision_backbone,
+            )
+
+        # Encoder - observation embedding
+        # If using images, we combine state + image features
         self.obs_embed = nn.Linear(config.obs_dim, config.hidden_dim)
+        if config.use_images:
+            # Fusion layer for state + image features
+            self.obs_fusion = nn.Sequential(
+                nn.Linear(config.hidden_dim * 2, config.hidden_dim),
+                nn.ReLU(),
+                nn.LayerNorm(config.hidden_dim),
+            )
+
         self.action_embed = nn.Linear(config.action_dim, config.hidden_dim)
 
         encoder_layer = nn.TransformerEncoderLayer(
@@ -87,11 +115,47 @@ class ACTModel(nn.Module):
             torch.randn(1, config.chunk_size + 1, config.hidden_dim) * 0.02
         )
 
-    def encode(self, obs: torch.Tensor, actions: Optional[torch.Tensor] = None):
-        """Encode observation (and actions during training) to latent"""
+    def _embed_observation(
+        self, obs: torch.Tensor, images: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """Embed observation, optionally fusing with image features.
+
+        Args:
+            obs: (B, obs_dim) state observation
+            images: (B, C, H, W) or (B, N, C, H, W) camera images
+
+        Returns:
+            (B, hidden_dim) embedded observation
+        """
+        obs_emb = self.obs_embed(obs)  # (B, H)
+
+        if self.vision_encoder is not None and images is not None:
+            img_emb = self.vision_encoder(images)  # (B, H)
+            # Fuse state and image features
+            combined = torch.cat([obs_emb, img_emb], dim=-1)  # (B, 2H)
+            obs_emb = self.obs_fusion(combined)  # (B, H)
+
+        return obs_emb
+
+    def encode(
+        self,
+        obs: torch.Tensor,
+        actions: Optional[torch.Tensor] = None,
+        images: Optional[torch.Tensor] = None,
+    ):
+        """Encode observation (and actions during training) to latent.
+
+        Args:
+            obs: (B, obs_dim) state observation
+            actions: (B, T, action_dim) action sequence (training only)
+            images: (B, C, H, W) or (B, N, C, H, W) camera images (optional)
+
+        Returns:
+            mu, logvar: Latent distribution parameters
+        """
         B = obs.shape[0]
 
-        obs_emb = self.obs_embed(obs).unsqueeze(1)  # (B, 1, H)
+        obs_emb = self._embed_observation(obs, images).unsqueeze(1)  # (B, 1, H)
 
         if actions is not None:
             action_emb = self.action_embed(actions)  # (B, T, H)
@@ -109,12 +173,26 @@ class ACTModel(nn.Module):
 
         return mu, logvar
 
-    def decode(self, z: torch.Tensor, obs: torch.Tensor):
-        """Decode latent to action sequence"""
+    def decode(
+        self,
+        z: torch.Tensor,
+        obs: torch.Tensor,
+        images: Optional[torch.Tensor] = None,
+    ):
+        """Decode latent to action sequence.
+
+        Args:
+            z: (B, latent_dim) latent vector
+            obs: (B, obs_dim) state observation
+            images: (B, C, H, W) or (B, N, C, H, W) camera images (optional)
+
+        Returns:
+            (B, chunk_size, action_dim) predicted actions
+        """
         B = z.shape[0]
 
         z_emb = self.latent_proj(z).unsqueeze(1)
-        obs_emb = self.obs_embed(obs).unsqueeze(1)
+        obs_emb = self._embed_observation(obs, images).unsqueeze(1)
         memory = torch.cat([z_emb, obs_emb], dim=1)
 
         queries = self.action_queries.unsqueeze(0).expand(B, -1, -1)
@@ -122,9 +200,24 @@ class ACTModel(nn.Module):
 
         return self.action_head(decoded)
 
-    def forward(self, obs: torch.Tensor, actions: Optional[torch.Tensor] = None):
-        """Forward pass"""
-        mu, logvar = self.encode(obs, actions)
+    def forward(
+        self,
+        obs: torch.Tensor,
+        actions: Optional[torch.Tensor] = None,
+        images: Optional[torch.Tensor] = None,
+    ):
+        """Forward pass.
+
+        Args:
+            obs: (B, obs_dim) state observation
+            actions: (B, T, action_dim) action sequence (training only)
+            images: (B, C, H, W) or (B, N, C, H, W) camera images (optional)
+
+        Returns:
+            pred_actions: (B, chunk_size, action_dim) predicted actions
+            mu, logvar: Latent distribution parameters
+        """
+        mu, logvar = self.encode(obs, actions, images)
 
         if self.training and actions is not None:
             std = torch.exp(0.5 * logvar)
@@ -132,18 +225,51 @@ class ACTModel(nn.Module):
         else:
             z = mu
 
-        pred_actions = self.decode(z, obs)
+        pred_actions = self.decode(z, obs, images)
 
         return pred_actions, mu, logvar
 
-    def predict(self, obs: torch.Tensor) -> np.ndarray:
-        """Inference: predict action chunk"""
+    def predict(
+        self, obs: torch.Tensor, images: Optional[torch.Tensor] = None
+    ) -> np.ndarray:
+        """Inference: predict action chunk.
+
+        Args:
+            obs: (obs_dim,) or (B, obs_dim) state observation
+            images: (C, H, W), (B, C, H, W) or (B, N, C, H, W) camera images
+
+        Returns:
+            (chunk_size, action_dim) predicted actions
+        """
         self.eval()
         with torch.no_grad():
             if obs.dim() == 1:
                 obs = obs.unsqueeze(0)
-            pred, _, _ = self(obs)
+            if images is not None and images.dim() == 3:
+                images = images.unsqueeze(0)
+            pred, _, _ = self(obs, images=images)
             return pred[0].cpu().numpy()
+
+
+def get_kl_weight(epoch: int, warmup_epochs: int = 50, max_weight: float = 10.0) -> float:
+    """
+    Compute KL weight with linear annealing.
+
+    Starts at 0 and linearly increases to max_weight over warmup_epochs.
+    This prevents posterior collapse by letting the model first learn
+    good reconstructions before enforcing the latent structure.
+
+    Args:
+        epoch: Current epoch (0-indexed)
+        warmup_epochs: Number of epochs to anneal over
+        max_weight: Maximum KL weight after warmup
+
+    Returns:
+        KL weight for the current epoch
+    """
+    if epoch < warmup_epochs:
+        return max_weight * (epoch / warmup_epochs)
+    return max_weight
 
 
 def compute_loss(
@@ -178,11 +304,31 @@ def train(
     lr: float = 1e-4,
     chunk_size: int = 50,
     include_object_obs: bool = False,
+    use_images: bool = False,
+    camera_names: list = None,
+    freeze_vision_backbone: bool = False,
     device: str = None,
 ):
-    """Train ACT model"""
+    """Train ACT model.
+
+    Args:
+        data_dir: Path to demonstration data directory
+        save_dir: Path to save checkpoints
+        epochs: Number of training epochs
+        batch_size: Batch size for training
+        lr: Learning rate
+        chunk_size: Action chunk size
+        include_object_obs: Include object observations (cloth corners, etc.)
+        use_images: Enable vision-based training with camera images
+        camera_names: List of camera names to use (default: ["bimanual_view"])
+        freeze_vision_backbone: Freeze ResNet backbone weights
+        device: Training device (cuda/cpu)
+    """
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    if camera_names is None:
+        camera_names = ["bimanual_view"]
 
     save_path = Path(save_dir)
     save_path.mkdir(parents=True, exist_ok=True)
@@ -190,6 +336,9 @@ def train(
     print(f"Training on {device}")
     print(f"Data: {data_dir}")
     print(f"Saving to: {save_path}")
+    print(f"Use images: {use_images}")
+    if use_images:
+        print(f"Cameras: {camera_names}")
 
     # Create dataloaders
     train_loader, val_loader, stats = create_dataloaders(
@@ -197,6 +346,8 @@ def train(
         batch_size=batch_size,
         chunk_size=chunk_size,
         include_object_obs=include_object_obs,
+        use_images=use_images,
+        camera_names=camera_names,
     )
 
     # Infer dimensions from data
@@ -211,6 +362,9 @@ def train(
         obs_dim=obs_dim,
         action_dim=action_dim,
         chunk_size=chunk_size,
+        use_images=use_images,
+        num_cameras=len(camera_names) if use_images else 1,
+        freeze_vision_backbone=freeze_vision_backbone,
     )
     model = ACTModel(config).to(device)
 
@@ -225,24 +379,38 @@ def train(
     best_val_loss = float("inf")
 
     for epoch in range(epochs):
+        # Compute annealed KL weight
+        current_kl_weight = get_kl_weight(
+            epoch, config.kl_warmup_epochs, config.kl_weight
+        )
+
         # Train
         model.train()
         train_losses = []
+        train_recon_losses = []
+        train_kl_losses = []
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{epochs}")
         for batch in pbar:
             obs = batch["obs"].to(device)
             actions = batch["action"].to(device)
 
+            # Get images if using vision
+            images = None
+            if use_images:
+                images = batch["images"].to(device)
+
             optimizer.zero_grad()
-            pred, mu, logvar = model(obs, actions)
-            losses = compute_loss(pred, actions, mu, logvar, config.kl_weight)
+            pred, mu, logvar = model(obs, actions, images)
+            losses = compute_loss(pred, actions, mu, logvar, current_kl_weight)
 
             losses["total"].backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
 
             train_losses.append(losses["total"].item())
+            train_recon_losses.append(losses["recon"].item())
+            train_kl_losses.append(losses["kl"].item())
             pbar.set_postfix({"loss": f"{losses['total'].item():.4f}"})
 
         scheduler.step()
@@ -255,14 +423,25 @@ def train(
             for batch in val_loader:
                 obs = batch["obs"].to(device)
                 actions = batch["action"].to(device)
-                pred, mu, logvar = model(obs, actions)
-                losses = compute_loss(pred, actions, mu, logvar, config.kl_weight)
+
+                # Get images if using vision
+                images = None
+                if use_images:
+                    images = batch["images"].to(device)
+
+                pred, mu, logvar = model(obs, actions, images)
+                losses = compute_loss(pred, actions, mu, logvar, current_kl_weight)
                 val_losses.append(losses["total"].item())
 
         train_loss = np.mean(train_losses)
+        train_recon = np.mean(train_recon_losses)
+        train_kl = np.mean(train_kl_losses)
         val_loss = np.mean(val_losses)
 
-        print(f"  Train: {train_loss:.4f} | Val: {val_loss:.4f}")
+        print(
+            f"  Train: {train_loss:.4f} (recon: {train_recon:.4f}, kl: {train_kl:.4f}) "
+            f"| Val: {val_loss:.4f} | KL_w: {current_kl_weight:.2f}"
+        )
 
         # Save best
         if val_loss < best_val_loss:
@@ -320,7 +499,9 @@ def load_policy(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+        description="Train ACT model for bimanual manipulation"
+    )
     parser.add_argument("--data_dir", type=str, default="data/bimanual")
     parser.add_argument("--save_dir", type=str, default="checkpoints")
     parser.add_argument("--epochs", type=int, default=500)
@@ -328,6 +509,25 @@ if __name__ == "__main__":
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--chunk_size", type=int, default=50)
     parser.add_argument("--include_object_obs", action="store_true")
+
+    # Vision arguments
+    parser.add_argument(
+        "--use_images",
+        action="store_true",
+        help="Enable vision-based training with camera images",
+    )
+    parser.add_argument(
+        "--camera_names",
+        type=str,
+        nargs="+",
+        default=["bimanual_view"],
+        help="Camera names to use for vision (default: bimanual_view)",
+    )
+    parser.add_argument(
+        "--freeze_vision_backbone",
+        action="store_true",
+        help="Freeze ResNet backbone weights (faster training, may limit performance)",
+    )
 
     args = parser.parse_args()
 
@@ -339,4 +539,7 @@ if __name__ == "__main__":
         lr=args.lr,
         chunk_size=args.chunk_size,
         include_object_obs=args.include_object_obs,
+        use_images=args.use_images,
+        camera_names=args.camera_names,
+        freeze_vision_backbone=args.freeze_vision_backbone,
     )

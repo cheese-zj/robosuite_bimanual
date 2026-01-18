@@ -1,6 +1,6 @@
 """
 Dataset loader for robosuite bimanual demonstrations.
-Compatible with ACT training.
+Compatible with ACT training with optional vision support.
 """
 
 import numpy as np
@@ -10,20 +10,26 @@ from torch.utils.data import Dataset, DataLoader
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 import json
+import torch.nn.functional as F
+
+# ImageNet normalization constants (used for ResNet)
+IMAGENET_MEAN = np.array([0.485, 0.456, 0.406])
+IMAGENET_STD = np.array([0.229, 0.224, 0.225])
 
 
 class BimanualDataset(Dataset):
     """
     Dataset for bimanual robosuite demonstrations.
-    
+
     Observation format (per arm):
         - joint_pos: (7,) joint positions
-        - joint_vel: (7,) joint velocities  
+        - joint_vel: (7,) joint velocities
         - eef_pos: (3,) end-effector position
         - eef_quat: (4,) end-effector quaternion
         - gripper_qpos: (2,) gripper position
-        
-    Total observation: 46 dims (23 per arm)
+
+    Total observation: 60 dims (30 per arm)
+    With object obs: +15 dims (cloth_corners: 12, cloth_center: 3)
     Action: Depends on controller (OSC_POSE = 14 dims)
     """
     
@@ -34,12 +40,14 @@ class BimanualDataset(Dataset):
         use_images: bool = False,
         include_object_obs: bool = False,
         camera_names: List[str] = None,
+        image_size: int = 224,
     ):
         self.data_dir = Path(data_dir)
         self.chunk_size = chunk_size
         self.use_images = use_images
         self.include_object_obs = include_object_obs
-        self.camera_names = camera_names or ["agentview"]
+        self.camera_names = camera_names or ["bimanual_view"]
+        self.image_size = image_size
         
         # Find all episodes
         self.episode_files = sorted(self.data_dir.glob("episode_*.hdf5"))
@@ -62,38 +70,55 @@ class BimanualDataset(Dataset):
         self.stats = self._compute_stats()
         
     def _compute_stats(self) -> Dict[str, np.ndarray]:
-        """Compute mean/std for normalization"""
+        """Compute normalization statistics.
+
+        For observations: Use mean/std normalization (z-score)
+        For actions: Use fixed bounds [-1, 1] since OSC controller expects this range
+        """
         all_obs = []
-        all_actions = []
-        
+
         for ep_file in self.episode_files[:min(50, len(self.episode_files))]:
             with h5py.File(ep_file, 'r') as f:
                 obs = self._load_obs_array(f)
-                actions = f['actions'][:]
                 all_obs.append(obs)
-                all_actions.append(actions)
-                
+
         all_obs = np.concatenate(all_obs)
-        all_actions = np.concatenate(all_actions)
-        
+
+        # Observation normalization: mean/std
+        obs_mean = all_obs.mean(axis=0)
+        obs_std = all_obs.std(axis=0) + 1e-6
+
+        # Action normalization: fixed bounds [-1, 1] for OSC controller
+        # This ensures training and deployment use the same normalization
+        action_dim = 14  # OSC_POSE: 7 per arm × 2 arms
+        action_low = np.full(action_dim, -1.0)
+        action_high = np.full(action_dim, 1.0)
+
         return {
-            'obs_mean': all_obs.mean(axis=0),
-            'obs_std': all_obs.std(axis=0) + 1e-6,
-            'action_mean': all_actions.mean(axis=0),
-            'action_std': all_actions.std(axis=0) + 1e-6,
+            'obs_mean': obs_mean,
+            'obs_std': obs_std,
+            # For actions, store bounds instead of mean/std
+            'action_low': action_low,
+            'action_high': action_high,
+            # Also compute empirical stats for reference/debugging
+            'action_mean': np.zeros(action_dim),  # Centered at 0
+            'action_std': np.ones(action_dim),    # Unit scale
         }
         
     def _load_obs_array(self, f: h5py.File) -> np.ndarray:
         """Load observations as single array"""
         obs_grp = f['observations']
-        
+
         # Concatenate all observation components
+        # Now includes joint velocities for better temporal modeling
         components = [
             obs_grp['robot0_joint_pos'][:],
+            obs_grp['robot0_joint_vel'][:],  # Added: joint velocities
             obs_grp['robot0_eef_pos'][:],
             obs_grp['robot0_eef_quat'][:],
             obs_grp['robot0_gripper_qpos'][:],
             obs_grp['robot1_joint_pos'][:],
+            obs_grp['robot1_joint_vel'][:],  # Added: joint velocities
             obs_grp['robot1_eef_pos'][:],
             obs_grp['robot1_eef_quat'][:],
             obs_grp['robot1_gripper_qpos'][:],
@@ -104,7 +129,7 @@ class BimanualDataset(Dataset):
                 components.append(obs_grp['cloth_corners'][:])
             if 'cloth_center' in obs_grp:
                 components.append(obs_grp['cloth_center'][:])
-        
+
         return np.concatenate(components, axis=1)
         
     def __len__(self) -> int:
@@ -126,27 +151,58 @@ class BimanualDataset(Dataset):
                 actions = np.pad(actions, ((0, pad_len), (0, 0)), mode='edge')
                 
             # Load images if requested
-            images = {}
+            images_list = []
             if self.use_images:
                 for cam in self.camera_names:
                     key = f"{cam}_image"
                     if key in f['observations']:
-                        images[cam] = f['observations'][key][t]
-                        
-        # Normalize
+                        images_list.append(f['observations'][key][t])
+
+        # Normalize observations (z-score)
         obs = (obs - self.stats['obs_mean']) / self.stats['obs_std']
-        actions = (actions - self.stats['action_mean']) / self.stats['action_std']
-        
+
+        # Normalize actions to [-1, 1] using fixed bounds
+        # Since OSC actions are already in [-1, 1], this is essentially identity
+        # but we keep it explicit for consistency
+        action_low = self.stats['action_low']
+        action_high = self.stats['action_high']
+        actions = 2 * (actions - action_low) / (action_high - action_low) - 1
+        # Clip to ensure bounds (handles any outliers in data)
+        actions = np.clip(actions, -1.0, 1.0)
+
         sample = {
             'obs': torch.FloatTensor(obs),
             'action': torch.FloatTensor(actions),
         }
-        
-        for cam, img in images.items():
-            img = img.astype(np.float32) / 255.0
-            img = np.transpose(img, (2, 0, 1))  # HWC -> CHW
-            sample[f'image_{cam}'] = torch.FloatTensor(img)
-            
+
+        # Process images if using vision
+        if self.use_images and images_list:
+            processed_images = []
+            for img in images_list:
+                # Convert to float [0, 1]
+                img = img.astype(np.float32) / 255.0
+                # HWC -> CHW
+                img = np.transpose(img, (2, 0, 1))
+                processed_images.append(img)
+
+            # Stack cameras: (N, C, H, W)
+            images_tensor = torch.FloatTensor(np.stack(processed_images))
+
+            # Resize to target size if needed
+            if images_tensor.shape[-1] != self.image_size:
+                images_tensor = F.interpolate(
+                    images_tensor,
+                    size=(self.image_size, self.image_size),
+                    mode='bilinear',
+                    align_corners=False,
+                )
+
+            # If single camera, squeeze the camera dimension
+            if len(self.camera_names) == 1:
+                images_tensor = images_tensor.squeeze(0)  # (C, H, W)
+
+            sample['images'] = images_tensor
+
         return sample
     
     def get_action_dim(self) -> int:
@@ -167,10 +223,34 @@ def create_dataloaders(
     train_split: float = 0.9,
     num_workers: int = 4,
     include_object_obs: bool = False,
+    use_images: bool = False,
+    camera_names: List[str] = None,
+    image_size: int = 224,
 ) -> Tuple[DataLoader, DataLoader, Dict]:
-    """Create train/val dataloaders"""
-    
-    dataset = BimanualDataset(data_dir, chunk_size=chunk_size, include_object_obs=include_object_obs)
+    """Create train/val dataloaders.
+
+    Args:
+        data_dir: Path to demonstration data directory
+        batch_size: Batch size for dataloaders
+        chunk_size: Action chunk size
+        train_split: Fraction of data for training (rest for validation)
+        num_workers: Number of dataloader workers
+        include_object_obs: Include object observations (cloth corners, etc.)
+        use_images: Load camera images for vision-based training
+        camera_names: List of camera names to load
+        image_size: Target image size (for ResNet, typically 224)
+
+    Returns:
+        train_loader, val_loader, stats
+    """
+    dataset = BimanualDataset(
+        data_dir,
+        chunk_size=chunk_size,
+        include_object_obs=include_object_obs,
+        use_images=use_images,
+        camera_names=camera_names,
+        image_size=image_size,
+    )
     
     # Split
     n_train = int(len(dataset) * train_split)

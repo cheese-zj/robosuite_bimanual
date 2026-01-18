@@ -65,7 +65,14 @@ Scripted collection uses world-frame OSC deltas by default. If you want base-fra
 
 ### 3. Train ACT policy
 ```bash
+# State-only training
 python train_act.py --data_dir data/bimanual --epochs 500
+
+# Vision-based training (recommended for cloth folding)
+python train_act.py --data_dir data/bimanual --epochs 500 --use_images --camera_names bimanual_view
+
+# Include cloth observations (corners, center)
+python train_act.py --data_dir data/bimanual --epochs 500 --include_object_obs
 ```
 
 ### 4. Deploy policy (see below)
@@ -126,11 +133,28 @@ Deploy a trained policy on a bimanual environment:
 
 ```bash
 python deploy_quad.py --checkpoint checkpoints/best_model.pt --task TwoArmLift --render
+
+# With receding horizon (recompute every 10 steps for error correction)
+python deploy_quad.py --checkpoint checkpoints/best_model.pt --two_arm_cloth --render --recompute_freq 10
 ```
 
 `deploy_quad.py` is a legacy filename from earlier multi-arm experiments.
 Use `--input_ref_frame base` if your training data used base-frame deltas.
 Use `--two_arm_cloth` to deploy in `TwoArmClothFold`.
+
+### Evaluation
+
+Evaluate a trained policy and get success metrics:
+
+```bash
+# Run 20 evaluation episodes
+python evaluate.py --checkpoint checkpoints/best_model.pt --task TwoArmClothFold --episodes 20
+
+# With rendering
+python evaluate.py --checkpoint checkpoints/best_model.pt --task TwoArmClothFold --episodes 10 --render
+```
+
+Results are saved to `eval_results/` as JSON files with success rate, avg reward, and episode statistics.
 
 ### Cloth Folding (Flex Cloth)
 
@@ -184,13 +208,15 @@ robosuite_bimanual/
 ├── collect_scripted.py     # Scripted data collection
 ├── dataset.py              # ACT-compatible data loading
 ├── deploy_quad.py          # Bimanual deployment script (legacy name)
+├── evaluate.py             # Policy evaluation with success metrics
+├── train_act.py            # ACT training script (state + vision)
+├── vision_encoder.py       # ResNet-18 image encoder for vision ACT
 ├── envs/                   # Two-arm robosuite envs
 │   └── two_arm_cloth_fold.py
 ├── mirror_transform.py     # Mirroring utilities
 ├── augment_data.py         # Mirror augmentation for datasets
 ├── scripted_policy.py      # Waypoint policy for scripted demos
-├── train_act.py            # ACT training script
-└── pyproject.toml          # Dependencies
+└── requirements.txt        # Dependencies
 ```
 
 ## Tips for Good Demonstrations
