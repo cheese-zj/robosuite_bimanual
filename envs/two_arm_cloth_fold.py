@@ -65,7 +65,7 @@ class TwoArmClothFold(TwoArmEnv):
         cloth_x_offset: float = -0.15,  # Shift cloth toward robots for reachability
         grasp_assist: bool = True,
         assist_radius: float = 0.15,
-        assist_max_verts: int = 5,
+        assist_max_verts: int = 8,  # Increased from 5 for more stable grip
         assist_action_threshold: float = 0.3,
         # Noise/randomization parameters
         cloth_noise: bool = False,  # Randomize cloth position on reset

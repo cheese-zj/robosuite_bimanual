@@ -121,7 +121,8 @@ class ClothFoldPolicyConfig:
     max_delta: float = 0.04
     grasp_dist_threshold: float = 0.05  # Increased threshold for easier transitions
     approach_steps: int = 15
-    grasp_steps: int = 25  # More time to close gripper
+    settle_steps: int = 10  # Wait time after reaching position before closing gripper
+    grasp_steps: int = 45  # More time to close gripper and ensure stable grip
     lift_steps: int = 20
     fold_steps: int = 30
     release_steps: int = 8
@@ -130,7 +131,7 @@ class ClothFoldPolicyConfig:
     close_gripper: float = 1.0
     layout: str = "front-back"  # "front-back" or "parallel"
     # Grasp inward offset - target slightly inside corners for reachability
-    grasp_inward_offset: float = 0.08  # Move 8cm toward cloth center
+    grasp_inward_offset: float = 0.05  # Move 5cm toward cloth center (reduced for better vertex capture)
 
 
 class ScriptedClothFoldPolicy:
@@ -274,11 +275,23 @@ class ScriptedClothFoldPolicy:
             dist0 = np.linalg.norm(target0 - eef0)
             dist1 = np.linalg.norm(target1 - eef1)
 
-            # Transition to grasp only when actually positioned correctly
+            # Transition to settle only when actually positioned correctly
             close_enough = (dist0 < self.config.grasp_dist_threshold and
                           dist1 < self.config.grasp_dist_threshold)
 
             if close_enough and self.phase_step >= self.config.approach_steps:
+                self.phase = "settle"
+                self.phase_step = 0
+
+        elif self.phase == "settle":
+            # Hold position at approach height with open grippers - let arms stabilize
+            target0 = grasp_pos0.copy()
+            target0[2] = left_corner[2] + self.config.approach_height
+            target1 = grasp_pos1.copy()
+            target1[2] = right_corner[2] + self.config.approach_height
+            gripper = self.config.open_gripper
+
+            if self.phase_step >= self.config.settle_steps:
                 self.phase = "grasp"
                 self.phase_step = 0
 

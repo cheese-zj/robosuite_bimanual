@@ -90,13 +90,13 @@ CLOTH_PRESETS: Dict[str, ClothConfig] = {
         spacing=0.025,
         mass=0.15,
         radius=0.002,
-        young=5e4,
+        young=2e4,           # Reduced from 5e4 - softer cloth, less spring-back
         poisson=0.2,
         thickness=2e-3,
         edge_equality=True,
-        edge_damping=0.05,
+        edge_damping=0.15,   # Increased from 0.05 - more damping for stability
         self_collide="none",
-        iterations=50,
+        iterations=75,       # Increased from 50 - better constraint satisfaction
     ),
     "realistic": ClothConfig(
         count_x=21,
