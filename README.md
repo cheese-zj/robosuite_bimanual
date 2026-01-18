@@ -236,6 +236,58 @@ sudo apt-get install python3.12-dev build-essential
 
 Replace `3.12` with your Python version, then retry the install.
 
+## Remote Server / Headless Collection
+
+For collecting data on remote servers without display:
+
+```bash
+# Set MuJoCo to use EGL (hardware-accelerated offscreen)
+export MUJOCO_GL=egl
+
+# Or use OSmesa (software rendering, no GPU required)
+export MUJOCO_GL=osmesa
+
+# Collect scripted demos (no viewer)
+python collect_scripted.py --policy cloth_fold --episodes 100
+
+# Collect teleop demos (offscreen rendering only)
+python collect_robosuite.py --task TwoArmClothFold --episodes 100 --no_camera_obs
+```
+
+### Recommended Settings for Remote
+
+| Setting | Value | Reason |
+|---------|-------|--------|
+| `--no_camera_obs` | Flag | Faster collection without camera rendering |
+| `--cloth_preset` | `fast` | 9×9 vertices, 30 iterations (vs 15×15, 75) |
+| `--episodes` | Batch | Run 50-100 per session for efficiency |
+
+### GPU-Accelerated Rendering
+
+If your server has an NVIDIA GPU:
+
+```bash
+# Install EGL support
+sudo apt-get install nvidia-cuda-toolkit
+
+# Verify GPU rendering
+python -c "import mujoco; print(mujoco.viewer.launch_passive())"
+```
+
+### Multiprocessing for Speed
+
+Run multiple collectors in parallel (different output directories):
+
+```bash
+# Terminal 1
+python collect_scripted.py --policy cloth_fold --episodes 50 --save_dir data/bimanual_1
+
+# Terminal 2
+python collect_scripted.py --policy cloth_fold --episodes 50 --save_dir data/bimanual_2
+
+# Then merge (manually copy HDF5 files to combined directory)
+```
+
 ## References
 
 - [Robosuite Documentation](https://robosuite.ai/)

@@ -47,7 +47,9 @@ class ScriptedBimanualPolicy:
 
         return np.asarray(handle0), np.asarray(handle1)
 
-    def _compute_arm_action(self, current: np.ndarray, target: np.ndarray, gripper: float) -> np.ndarray:
+    def _compute_arm_action(
+        self, current: np.ndarray, target: np.ndarray, gripper: float
+    ) -> np.ndarray:
         """Compute normalized action for OSC controller.
 
         The OSC controller expects normalized inputs [-1, 1] which it scales to output_max (0.05m).
@@ -74,7 +76,10 @@ class ScriptedBimanualPolicy:
 
             dist0 = np.linalg.norm(target0 - eef0)
             dist1 = np.linalg.norm(target1 - eef1)
-            if dist0 < self.config.grasp_dist_threshold and dist1 < self.config.grasp_dist_threshold:
+            if (
+                dist0 < self.config.grasp_dist_threshold
+                and dist1 < self.config.grasp_dist_threshold
+            ):
                 if self.phase_step >= self.config.settle_steps:
                     self.phase = "grasp"
                     self.phase_step = 0
@@ -113,25 +118,40 @@ class ScriptedBimanualPolicy:
 @dataclass
 class ClothFoldPolicyConfig:
     approach_height: float = 0.02  # Very low approach - just above cloth
-    grasp_height: float = 0.0      # At cloth level for contact
-    lift_height: float = 0.04      # Moderate lift - enough clearance but cloth stays on table
+    grasp_height: float = 0.0  # At cloth level for contact
+    lift_height: float = (
+        0.04  # Moderate lift - enough clearance but cloth stays on table
+    )
     fold_height: float = 0.10
-    retreat_height: float = 0.15   # Height to retreat to after release
+    retreat_height: float = 0.15  # Height to retreat to after release
     pos_gain: float = 1.0
     max_delta: float = 0.04
     grasp_dist_threshold: float = 0.05  # Increased threshold for easier transitions
     approach_steps: int = 15
     settle_steps: int = 10  # Wait time after reaching position before closing gripper
-    grasp_steps: int = 25  # Time for gripper to close and vertices to attach
+    grasp_steps: int = (
+        20  # Time for gripper to close and vertices to attach (reduced from 25)
+    )
     lift_steps: int = 20
-    fold_steps: int = 50  # More time for smooth cloth physics during fold
+    fold_steps: int = 40  # Time for smooth cloth physics during fold (reduced from 50)
     release_steps: int = 8
-    retreat_steps: int = 15  # Steps for retreat phase
+    retreat_steps: int = 12  # Steps for retreat phase (reduced from 15)
     open_gripper: float = -1.0
     close_gripper: float = 1.0
     layout: str = "front-back"  # "front-back" or "parallel"
     # Grasp inward offset - target slightly inside corners for reachability
-    grasp_inward_offset: float = 0.02  # Move 2cm toward cloth center (close to true edge)
+    grasp_inward_offset: float = (
+        0.02  # Move 2cm toward cloth center (close to true edge)
+    )
+    # Position convergence tolerance for early phase exit
+    position_tolerance: float = 0.02  # 2cm - arms within this distance = converged
+    # Minimum steps before position-based early exit is allowed
+    min_settle_steps: int = 5
+    min_grasp_steps: int = 15
+    min_lift_steps: int = 10
+    min_fold_steps: int = 20
+    min_release_steps: int = 5
+    min_retreat_steps: int = 5
 
 
 class ScriptedClothFoldPolicy:
@@ -142,7 +162,9 @@ class ScriptedClothFoldPolicy:
     - "parallel": Robots on left side (-x), grasp left corners, fold along X-axis
     """
 
-    def __init__(self, config: Optional[ClothFoldPolicyConfig] = None, debug: bool = False):
+    def __init__(
+        self, config: Optional[ClothFoldPolicyConfig] = None, debug: bool = False
+    ):
         self.config = config or ClothFoldPolicyConfig()
         self.phase = "approach"
         self.phase_step = 0
@@ -191,21 +213,49 @@ class ScriptedClothFoldPolicy:
             ys = corners[:, 1]
             front_indices = np.argsort(ys)[-2:]  # Two largest Y values
             front = corners[front_indices]
-            left = front[np.argmin(front[:, 0])]   # Front-left
+            left = front[np.argmin(front[:, 0])]  # Front-left
             right = front[np.argmax(front[:, 0])]  # Front-right
             return left, right
 
-    def _compute_arm_action(self, current: np.ndarray, target: np.ndarray, gripper: float) -> np.ndarray:
+    def _compute_arm_action(
+        self, current: np.ndarray, target: np.ndarray, gripper: float
+    ) -> np.ndarray:
         """Compute normalized action for OSC controller.
 
         The OSC controller expects normalized inputs [-1, 1] which it scales to output_max (0.05m).
         """
         delta = self.config.pos_gain * (target - current)
-        # Normalize delta to [-1, 1] range for OSC controller
         osc_output_max = 0.05
         normalized_delta = delta / osc_output_max
         normalized_delta = np.clip(normalized_delta, -1.0, 1.0)
         return np.concatenate([normalized_delta, np.zeros(3), np.array([gripper])])
+
+    def _check_phase_complete(
+        self,
+        eef0: np.ndarray,
+        target0: np.ndarray,
+        eef1: np.ndarray,
+        target1: np.ndarray,
+        min_steps: int,
+        max_steps: int,
+        phase_name: str,
+    ) -> bool:
+        dist0 = np.linalg.norm(target0 - eef0)
+        dist1 = np.linalg.norm(target1 - eef1)
+        converged = (
+            dist0 < self.config.position_tolerance
+            and dist1 < self.config.position_tolerance
+        )
+
+        max_reached = self.phase_step >= max_steps
+        early_exit = converged and self.phase_step >= min_steps
+
+        if self.debug and early_exit and not max_reached:
+            print(
+                f"  [Early exit] {phase_name} at step {self.phase_step} (dist0={dist0:.4f}, dist1={dist1:.4f})"
+            )
+
+        return max_reached or early_exit
 
     def predict(self, obs: Dict) -> np.ndarray:
         eef0 = obs.get("robot0_eef_pos")
@@ -276,8 +326,10 @@ class ScriptedClothFoldPolicy:
             dist1 = np.linalg.norm(target1 - eef1)
 
             # Transition to settle only when actually positioned correctly
-            close_enough = (dist0 < self.config.grasp_dist_threshold and
-                          dist1 < self.config.grasp_dist_threshold)
+            close_enough = (
+                dist0 < self.config.grasp_dist_threshold
+                and dist1 < self.config.grasp_dist_threshold
+            )
 
             if close_enough and self.phase_step >= self.config.approach_steps:
                 self.phase = "settle"
@@ -291,7 +343,15 @@ class ScriptedClothFoldPolicy:
             target1[2] = right_corner[2] + self.config.approach_height
             gripper = self.config.open_gripper
 
-            if self.phase_step >= self.config.settle_steps:
+            if self._check_phase_complete(
+                eef0,
+                target0,
+                eef1,
+                target1,
+                self.config.min_settle_steps,
+                self.config.settle_steps,
+                "settle",
+            ):
                 self.phase = "grasp"
                 self.phase_step = 0
 
@@ -303,7 +363,15 @@ class ScriptedClothFoldPolicy:
             target1[2] = right_corner[2] + self.config.grasp_height
             gripper = self.config.close_gripper
 
-            if self.phase_step >= self.config.grasp_steps:
+            if self._check_phase_complete(
+                eef0,
+                target0,
+                eef1,
+                target1,
+                self.config.min_grasp_steps,
+                self.config.grasp_steps,
+                "grasp",
+            ):
                 self.phase = "lift"
                 self.phase_step = 0
 
@@ -315,7 +383,15 @@ class ScriptedClothFoldPolicy:
             target1[2] = right_corner[2] + self.config.lift_height
             gripper = self.config.close_gripper
 
-            if self.phase_step >= self.config.lift_steps:
+            if self._check_phase_complete(
+                eef0,
+                target0,
+                eef1,
+                target1,
+                self.config.min_lift_steps,
+                self.config.lift_steps,
+                "lift",
+            ):
                 self.phase = "fold"
                 self.phase_step = 0
 
@@ -336,7 +412,15 @@ class ScriptedClothFoldPolicy:
                 target1 = np.array([grasp_pos1[0], fold_y, table_z + 0.02])
             gripper = self.config.close_gripper
 
-            if self.phase_step >= self.config.fold_steps:
+            if self._check_phase_complete(
+                eef0,
+                target0,
+                eef1,
+                target1,
+                self.config.min_fold_steps,
+                self.config.fold_steps,
+                "fold",
+            ):
                 self.phase = "release"
                 self.phase_step = 0
 
@@ -353,7 +437,15 @@ class ScriptedClothFoldPolicy:
                 target1 = np.array([grasp_pos1[0], fold_y, table_z + 0.02])
             gripper = self.config.open_gripper
 
-            if self.phase_step >= self.config.release_steps:
+            if self._check_phase_complete(
+                eef0,
+                target0,
+                eef1,
+                target1,
+                self.config.min_release_steps,
+                self.config.release_steps,
+                "release",
+            ):
                 self.phase = "retreat"
                 self.phase_step = 0
 
@@ -362,15 +454,31 @@ class ScriptedClothFoldPolicy:
             table_z = 0.81
             if self.config.layout == "parallel":
                 fold_x = 0.0
-                target0 = np.array([fold_x, grasp_pos0[1], table_z + self.config.retreat_height])
-                target1 = np.array([fold_x, grasp_pos1[1], table_z + self.config.retreat_height])
+                target0 = np.array(
+                    [fold_x, grasp_pos0[1], table_z + self.config.retreat_height]
+                )
+                target1 = np.array(
+                    [fold_x, grasp_pos1[1], table_z + self.config.retreat_height]
+                )
             else:  # front-back layout
                 fold_y = -0.1
-                target0 = np.array([grasp_pos0[0], fold_y, table_z + self.config.retreat_height])
-                target1 = np.array([grasp_pos1[0], fold_y, table_z + self.config.retreat_height])
+                target0 = np.array(
+                    [grasp_pos0[0], fold_y, table_z + self.config.retreat_height]
+                )
+                target1 = np.array(
+                    [grasp_pos1[0], fold_y, table_z + self.config.retreat_height]
+                )
             gripper = self.config.open_gripper
 
-            if self.phase_step >= self.config.retreat_steps:
+            if self._check_phase_complete(
+                eef0,
+                target0,
+                eef1,
+                target1,
+                self.config.min_retreat_steps,
+                self.config.retreat_steps,
+                "retreat",
+            ):
                 self.phase = "done"
                 self.phase_step = 0
                 self._done = True
@@ -380,12 +488,20 @@ class ScriptedClothFoldPolicy:
             table_z = 0.81
             if self.config.layout == "parallel":
                 fold_x = 0.0
-                target0 = np.array([fold_x, grasp_pos0[1], table_z + self.config.retreat_height])
-                target1 = np.array([fold_x, grasp_pos1[1], table_z + self.config.retreat_height])
+                target0 = np.array(
+                    [fold_x, grasp_pos0[1], table_z + self.config.retreat_height]
+                )
+                target1 = np.array(
+                    [fold_x, grasp_pos1[1], table_z + self.config.retreat_height]
+                )
             else:  # front-back layout
                 fold_y = -0.1
-                target0 = np.array([grasp_pos0[0], fold_y, table_z + self.config.retreat_height])
-                target1 = np.array([grasp_pos1[0], fold_y, table_z + self.config.retreat_height])
+                target0 = np.array(
+                    [grasp_pos0[0], fold_y, table_z + self.config.retreat_height]
+                )
+                target1 = np.array(
+                    [grasp_pos1[0], fold_y, table_z + self.config.retreat_height]
+                )
             gripper = self.config.open_gripper
 
         action0 = self._compute_arm_action(np.asarray(eef0), target0, gripper)

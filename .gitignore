@@ -79,7 +79,9 @@ config.local.*
 # Mujoco/Robosuite specific
 # ===============================================
 .mujoco/
-*.xml
+
+# Keep XML assets (camera configs, etc.)
+!assets/**/*.xml
 
 # ===============================================
 # OS-specific
