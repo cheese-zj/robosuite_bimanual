@@ -51,6 +51,8 @@ data/                     # Demo data (HDF5 files - typically 22MB+)
 checkpoints/             # Trained models
 *.hdf5                   # HDF5 data files
 *.h5
+data/bimanual/
+MUJOCO_LOG.TXT
 
 # ===============================================
 # Cache and temporary files
