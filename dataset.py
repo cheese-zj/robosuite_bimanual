@@ -21,16 +21,16 @@ class BimanualDataset(Dataset):
     """
     Dataset for bimanual robosuite demonstrations.
 
-    Observation format (per arm):
-        - joint_pos: (7,) joint positions
-        - joint_vel: (7,) joint velocities
+    Observation format (per arm, DoF-agnostic):
+        - joint_pos: (N,) joint positions (N depends on robot, e.g., 6 for Piper, 7 for Panda)
+        - joint_vel: (N,) joint velocities
         - eef_pos: (3,) end-effector position
         - eef_quat: (4,) end-effector quaternion
         - gripper_qpos: (2,) gripper position
 
-    Total observation: 60 dims (30 per arm)
+    Total observation: 2 * (2*N + 9) dims (varies by robot)
     With object obs: +15 dims (cloth_corners: 12, cloth_center: 3)
-    Action: Depends on controller (OSC_POSE = 14 dims)
+    Action: Depends on controller (OSC_POSE = 14 dims for 2-arm)
     """
     
     def __init__(

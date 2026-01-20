@@ -48,8 +48,11 @@ def run_scripted_collection(
         layout = "parallel"
         if env_configuration == "opposed":
             layout = "front-back"
+        # Piper's gripper is integrated into the arm's MJCF
+        # The grasp_assist feature handles cloth grasping
+        has_gripper = False
         policy = ScriptedClothFoldPolicy(
-            ClothFoldPolicyConfig(layout=layout), debug=debug
+            ClothFoldPolicyConfig(layout=layout, has_gripper=has_gripper), debug=debug
         )
         needs_object_obs = True
     else:
@@ -69,6 +72,19 @@ def run_scripted_collection(
         camera_list = ["bimanual_view"]
 
     if two_arm_cloth:
+        # Ensure Piper robot is registered before importing TwoArmClothFold
+        # create_bimanual_env registers Piper when called with robots='Piper'
+        from collect_robosuite import create_bimanual_env
+
+        # Trigger Piper registration with a dummy call (won't actually create env)
+        _ = create_bimanual_env(
+            robots=robot if robot == "Piper" else "Panda",
+            task="TwoArmLift",
+            has_renderer=False,
+            has_offscreen_renderer=False,
+            use_camera_obs=False,
+        )
+
         from envs.two_arm_cloth_fold import TwoArmClothFold
 
         robots_list = [robot, robot] if isinstance(robot, str) else robot
@@ -132,7 +148,7 @@ def run_scripted_collection(
             steps += 1
 
             # Check if scripted policy has completed all phases
-            if hasattr(policy, 'done') and policy.done:
+            if hasattr(policy, "done") and policy.done:
                 done = True
                 info["success"] = True
 

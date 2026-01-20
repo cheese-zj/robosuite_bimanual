@@ -89,7 +89,7 @@ CLOTH_PRESETS: Dict[str, ClothConfig] = {
         count_y=15,
         spacing=0.025,
         mass=0.15,
-        radius=0.002,
+        radius=0.001,  # Reduced from 0.002 to minimize phantom collisions
         young=2e4,           # Reduced from 5e4 - softer cloth, less spring-back
         poisson=0.2,
         thickness=2e-3,
@@ -128,6 +128,23 @@ CLOTH_PRESETS: Dict[str, ClothConfig] = {
         contact_condim=3,
         contact_solref=(0.005, 1.0),
         iterations=50,
+    ),
+    "piper": ClothConfig(
+        # Narrower cloth for Piper robot with limited reach
+        # Robot bases at Y=±0.18, can reach ~0.04m inward → Y=±0.14
+        # Cloth width = (count_y-1) * spacing = 12 * 0.025 = 0.30m → corners at Y=±0.15
+        count_x=11,  # Shorter in X (folding direction)
+        count_y=13,  # Narrower for Piper reachability
+        spacing=0.025,  # Same density as medium
+        mass=0.12,
+        radius=0.001,
+        young=2e4,
+        poisson=0.2,
+        thickness=2e-3,
+        edge_equality=True,
+        edge_damping=0.15,
+        self_collide="none",
+        iterations=75,
     ),
 }
 

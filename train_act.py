@@ -22,10 +22,15 @@ from dataset import create_dataloaders
 
 @dataclass
 class ACTConfig:
-    """ACT model configuration"""
+    """ACT model configuration
 
-    obs_dim: int = 60  # 30 per arm × 2 arms (now includes joint velocities)
-    action_dim: int = 14  # 7 per arm × 2 arms (OSC_POSE)
+    Note: obs_dim and action_dim are now inferred from data at runtime.
+    Default values are for 7-DoF robots (Panda). For 6-DoF (Piper),
+    obs_dim will be 42 (21 per arm) instead of 60 (30 per arm).
+    """
+
+    obs_dim: int = 0  # Inferred from data (0 = auto-detect)
+    action_dim: int = 0  # Inferred from data (0 = auto-detect)
     hidden_dim: int = 256
     n_heads: int = 8
     n_encoder_layers: int = 4

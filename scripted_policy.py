@@ -117,41 +117,34 @@ class ScriptedBimanualPolicy:
 
 @dataclass
 class ClothFoldPolicyConfig:
-    approach_height: float = 0.02  # Very low approach - just above cloth
+    approach_height: float = 0.025  # Slightly higher for Piper clearance
     grasp_height: float = 0.0  # At cloth level for contact
-    lift_height: float = (
-        0.04  # Moderate lift - enough clearance but cloth stays on table
-    )
-    fold_height: float = 0.10
-    retreat_height: float = 0.15  # Height to retreat to after release
+    lift_height: float = 0.05  # Moderate lift - enough clearance (Piper shorter reach)
+    fold_height: float = 0.08  # Slightly lower for Piper center of mass
+    retreat_height: float = 0.12  # Height to retreat after release
     pos_gain: float = 1.0
     max_delta: float = 0.04
-    grasp_dist_threshold: float = 0.05  # Increased threshold for easier transitions
-    approach_steps: int = 15
-    settle_steps: int = 10  # Wait time after reaching position before closing gripper
-    grasp_steps: int = (
-        20  # Time for gripper to close and vertices to attach (reduced from 25)
-    )
-    lift_steps: int = 20
-    fold_steps: int = 40  # Time for smooth cloth physics during fold (reduced from 50)
+    grasp_dist_threshold: float = 0.06  # Increased for Piper shorter reach
+    approach_steps: int = 12  # Fewer steps (Piper faster joints)
+    settle_steps: int = 8  # Less settling needed
+    grasp_steps: int = 15  # Faster gripper response on Piper
+    lift_steps: int = 15
+    fold_steps: int = 35  # Slightly faster fold (Piper 225°/s joints)
     release_steps: int = 8
-    retreat_steps: int = 12  # Steps for retreat phase (reduced from 15)
+    retreat_steps: int = 10  # Faster retreat
     open_gripper: float = -1.0
     close_gripper: float = 1.0
     layout: str = "front-back"  # "front-back" or "parallel"
-    # Grasp inward offset - target slightly inside corners for reachability
-    grasp_inward_offset: float = (
-        0.02  # Move 2cm toward cloth center (close to true edge)
-    )
-    # Position convergence tolerance for early phase exit
-    position_tolerance: float = 0.02  # 2cm - arms within this distance = converged
-    # Minimum steps before position-based early exit is allowed
-    min_settle_steps: int = 5
-    min_grasp_steps: int = 15
-    min_lift_steps: int = 10
-    min_fold_steps: int = 20
-    min_release_steps: int = 5
+    grasp_inward_offset: float = 0.025  # 2.5cm toward cloth center (Piper parallel jaw)
+    position_tolerance: float = 0.025  # 2.5cm - arms within this distance = converged
+    min_settle_steps: int = 4
+    min_grasp_steps: int = 10
+    min_lift_steps: int = 8
+    min_fold_steps: int = 18
+    min_release_steps: int = 4
     min_retreat_steps: int = 5
+    # Piper HAS controllable gripper (integrated parallel jaw)
+    has_gripper: bool = True
 
 
 class ScriptedClothFoldPolicy:
@@ -223,12 +216,17 @@ class ScriptedClothFoldPolicy:
         """Compute normalized action for OSC controller.
 
         The OSC controller expects normalized inputs [-1, 1] which it scales to output_max (0.05m).
+        If has_gripper is False, returns 6-dim action (no gripper control).
         """
         delta = self.config.pos_gain * (target - current)
         osc_output_max = 0.05
         normalized_delta = delta / osc_output_max
         normalized_delta = np.clip(normalized_delta, -1.0, 1.0)
-        return np.concatenate([normalized_delta, np.zeros(3), np.array([gripper])])
+        if self.config.has_gripper:
+            return np.concatenate([normalized_delta, np.zeros(3), np.array([gripper])])
+        else:
+            # No gripper control - return 6-dim action (position + orientation deltas only)
+            return np.concatenate([normalized_delta, np.zeros(3)])
 
     def _check_phase_complete(
         self,

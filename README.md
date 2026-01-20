@@ -167,6 +167,28 @@ python collect_scripted.py --two_arm_cloth --policy cloth_fold --episodes 20 --r
 The cloth folding env uses a grasp-assist (pins nearby cloth vertices to the gripper while closed)
 to make folding feasible without teleop.
 
+#### Piper Robot Cloth Folding
+
+For the AgileX Piper robot (6-DoF arm with limited reach), use the dedicated script:
+
+```bash
+# Demo mode (view without saving)
+python collect_scripted_piper.py --demo --render
+
+# Collect demonstrations
+python collect_scripted_piper.py --episodes 50 --render --save_dir data/piper_cloth
+
+# With debug output
+python collect_scripted_piper.py --demo --render --debug
+
+# Fast cloth preset for quicker iteration
+python collect_scripted_piper.py --episodes 50 --render --cloth_preset fast
+```
+
+The Piper script uses custom robot positioning optimized for Piper's ~350mm reach:
+- Robots positioned at X=-0.20 (closer to table center)
+- Full fold motion: left corners → right corners with arc trajectory
+
 Train with cloth observations enabled:
 
 ```bash
@@ -205,7 +227,8 @@ If you need higher-fidelity cloth dynamics, consider SoftGym or Isaac.
 ```
 robosuite_bimanual/
 ├── collect_robosuite.py    # Data collection with viewer
-├── collect_scripted.py     # Scripted data collection
+├── collect_scripted.py     # Scripted data collection (Panda)
+├── collect_scripted_piper.py # Scripted cloth folding for Piper robot
 ├── dataset.py              # ACT-compatible data loading
 ├── deploy_quad.py          # Bimanual deployment script (legacy name)
 ├── evaluate.py             # Policy evaluation with success metrics

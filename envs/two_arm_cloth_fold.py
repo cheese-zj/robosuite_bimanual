@@ -62,10 +62,10 @@ class TwoArmClothFold(TwoArmEnv):
         cloth_preset: str = "medium",
         cloth_config: Optional[ClothConfig] = None,
         cloth_offset: float = 0.01,
-        cloth_x_offset: float = -0.15,  # Shift cloth toward robots for reachability
+        cloth_x_offset: float = -0.05,  # Shift cloth toward robots for reachability
         grasp_assist: bool = True,
         assist_radius: float = 0.15,
-        assist_max_verts: int = 8,  # Increased from 5 for more stable grip
+        assist_max_verts: int = 12,  # Increased for more stable cloth grip
         assist_action_threshold: float = 0.3,
         # Noise/randomization parameters
         cloth_noise: bool = False,  # Randomize cloth position on reset
@@ -113,6 +113,11 @@ class TwoArmClothFold(TwoArmEnv):
         self._gripper_site_ids = []
         self._assist_vertices = {}
         self._assist_offsets = {}
+        self._assist_initial_xpos = {}  # Store initial vertex xpos for qpos calculation
+        self._cloth_qpos_start = None  # Starting index of cloth vertices in qpos
+        # External gripper signals for 0-DOF grippers (like Piper)
+        # Set via env.gripper_signals = [signal0, signal1] before step()
+        self.gripper_signals = None
 
         # Handle robot initialization noise flag
         # If robot_noise is False, disable initialization noise; otherwise use default
@@ -173,11 +178,15 @@ class TwoArmClothFold(TwoArmEnv):
             else:  # "parallel" configuration setting (default for cloth folding)
                 # Set up robots parallel to each other but offset from the center
                 # Both robots on the -x side, offset along y-axis
-                for robot, offset in zip(self.robots, (-0.25, 0.25)):
+                # Piper EEF starts ~0.02m outward from base, can reach ~0.02m inward
+                # Cloth corners at Y=±0.15, targets at Y=±0.14 after inward offset
+                # With bases at Y=±0.16, EEF starts at ~Y=±0.14 (exactly at targets)
+                y_offset = 0.16
+                for robot, sign in zip(self.robots, (-1, 1)):
                     xpos = robot.robot_model.base_xpos_offset["table"](
                         self.table_full_size[0]
                     )
-                    xpos = np.array(xpos) + np.array((0, offset, 0))
+                    xpos = np.array(xpos) + np.array((0, sign * y_offset, 0))
                     robot.robot_model.set_base_xpos(xpos)
 
         # Create table arena
@@ -249,14 +258,33 @@ class TwoArmClothFold(TwoArmEnv):
                 self._cloth_vert_slice = slice(start, start + count)
 
         # Find gripper site IDs for grasp assist
+        # For Piper robots, use link7 (finger) body position instead of grip_site
+        # because the null_gripper's grip_site is at link6, not the actual fingers
         self._gripper_site_ids = []
-        for robot in self.robots:
+        self._gripper_body_ids = []  # For Piper: use body positions instead
+        for idx, robot in enumerate(self.robots):
             arm = robot.arms[0] if hasattr(robot, "arms") and robot.arms else "right"
             gripper = robot.gripper
             if isinstance(gripper, dict):
                 gripper = gripper[arm]
-            site_name = gripper.naming_prefix + "grip_site"
-            self._gripper_site_ids.append(self.sim.model.site_name2id(site_name))
+
+            # Check if this is a Piper robot by looking for link7 body
+            piper_link7_name = f"robot{idx}_link7"
+            try:
+                body_id = self.sim.model.body_name2id(piper_link7_name)
+                self._gripper_body_ids.append(body_id)
+                self._gripper_site_ids.append(None)  # Placeholder
+            except Exception:
+                # Not Piper - use standard grip_site
+                site_name = gripper.naming_prefix + "grip_site"
+                self._gripper_site_ids.append(self.sim.model.site_name2id(site_name))
+                self._gripper_body_ids.append(None)
+
+        # Find the starting qpos index for cloth vertices
+        # Cloth bodies come after robot joints in qpos
+        # Each cloth vertex has 3 DOF (x, y, z offset from initial position)
+        robot_joints = sum(len(robot.robot_joints) for robot in self.robots)
+        self._cloth_qpos_start = robot_joints
 
     def _get_cloth_vertices(self) -> Optional[np.ndarray]:
         """Get all cloth vertex positions."""
@@ -270,15 +298,34 @@ class TwoArmClothFold(TwoArmEnv):
         return np.array(verts, copy=True)
 
     def _get_gripper_positions(self) -> Optional[np.ndarray]:
-        """Get positions of all gripper sites."""
-        if not self._gripper_site_ids:
+        """Get positions of all gripper sites (or finger bodies for Piper)."""
+        if not self._gripper_site_ids and not self._gripper_body_ids:
             return None
-        return np.array(
-            [self.sim.data.site_xpos[sid] for sid in self._gripper_site_ids], copy=True
-        )
+        positions = []
+        for idx in range(len(self.robots)):
+            if self._gripper_body_ids and self._gripper_body_ids[idx] is not None:
+                # Piper: use link7 body position (actual finger position)
+                positions.append(self.sim.data.body_xpos[self._gripper_body_ids[idx]])
+            elif self._gripper_site_ids and self._gripper_site_ids[idx] is not None:
+                # Standard: use grip_site position
+                positions.append(self.sim.data.site_xpos[self._gripper_site_ids[idx]])
+            else:
+                return None
+        return np.array(positions, copy=True)
 
-    def _find_nearest_vertices(self, gripper_pos: np.ndarray) -> np.ndarray:
-        """Find cloth vertices within assist radius of gripper."""
+    def _find_nearest_vertices(self, gripper_pos: np.ndarray, radius: float = None) -> np.ndarray:
+        """Find cloth vertices within radius of gripper.
+
+        Args:
+            gripper_pos: Gripper position (3D)
+            radius: Search radius, defaults to self.assist_radius
+
+        Returns:
+            Array of vertex indices within radius
+        """
+        if radius is None:
+            radius = self.assist_radius
+
         if getattr(self.sim.model, "nflex", 0) <= 0 or not hasattr(
             self.sim.data, "flexvert_xpos"
         ):
@@ -290,15 +337,21 @@ class TwoArmClothFold(TwoArmEnv):
             verts = verts[self._cloth_vert_slice]
 
         dists = np.linalg.norm(verts - gripper_pos[None, :], axis=1)
-        candidates = np.where(dists <= self.assist_radius)[0]
+        candidates = np.where(dists <= radius)[0]
         if candidates.size == 0:
             return np.array([], dtype=int)
-        order = candidates[np.argsort(dists[candidates])]
-        chosen = order[: self.assist_max_verts]
-        return chosen + offset
+        # Return all candidates (caller will filter/sort as needed)
+        return candidates + offset
 
     def _update_grasp_assist(self, action):
-        """Update grasp assist: pin nearby cloth vertices to closing grippers."""
+        """Update grasp assist: pin cloth vertices to closing grippers.
+
+        IMPORTANT: Only pins vertices when gripper is physically at cloth level.
+        This ensures grippers visually touch the cloth before picking it up.
+
+        For 0-DOF grippers (like Piper), set env.gripper_signals = [signal0, signal1]
+        before calling step(). Values > assist_action_threshold (default 0.3) trigger closing.
+        """
         if not self.grasp_assist:
             return
         if getattr(self.sim.model, "nflex", 0) <= 0 or not hasattr(
@@ -320,33 +373,123 @@ class TwoArmClothFold(TwoArmEnv):
         if gripper_positions is None:
             return
 
+        # Get cloth Z level for proximity check
+        if hasattr(self, '_cloth_vert_slice') and self._cloth_vert_slice is not None:
+            cloth_z = self.sim.data.flexvert_xpos[self._cloth_vert_slice, 2].mean()
+        else:
+            cloth_z = self.table_offset[2] + 0.01  # Fallback to table height + cloth offset
+
         # Check each gripper for closing/opening
         for idx, gripper_pos in enumerate(gripper_positions):
-            grip_cmd = action[idx * per_arm_dim + (per_arm_dim - 1)]
+            # Use external gripper signals if provided (for 0-DOF grippers like Piper)
+            # Otherwise, extract from action (last element of each arm's action)
+            if self.gripper_signals is not None and idx < len(self.gripper_signals):
+                grip_cmd = self.gripper_signals[idx]
+            else:
+                grip_cmd = action[idx * per_arm_dim + (per_arm_dim - 1)]
             closing = grip_cmd > self.assist_action_threshold
 
+
             if closing and idx not in self._assist_vertices:
-                # Gripper is closing - find nearby vertices to attach
-                vertices = self._find_nearest_vertices(gripper_pos)
+                # Only pin if gripper is at cloth level (within 5cm vertically)
+                # This ensures gripper physically reaches the cloth before pinning
+                # Relaxed from 3cm to 5cm for more forgiving grasp triggering
+                gripper_z = gripper_pos[2]
+                z_distance = abs(gripper_z - cloth_z)
+                if z_distance > 0.05:  # Relaxed from 0.03 for more reliable pinning
+                    # Gripper not at cloth level yet - don't pin
+                    continue
+
+                # Gripper is at cloth level - find nearby vertices to attach
+                # Use larger radius to find candidates, then select closest ones
+                vertices = self._find_nearest_vertices(gripper_pos, radius=0.10)  # 10cm radius
                 if vertices.size == 0:
                     continue
+
+                # Sort by distance and take closest ones
+                vertex_positions = self.sim.data.flexvert_xpos[vertices]
+                distances = np.linalg.norm(vertex_positions - gripper_pos[None, :], axis=1)
+                sorted_indices = np.argsort(distances)
+                # Take up to assist_max_verts closest vertices
+                num_to_pin = min(self.assist_max_verts, len(sorted_indices))
+                vertices = vertices[sorted_indices[:num_to_pin]]
+                if vertices.size == 0:
+                    continue
+
                 self._assist_vertices[idx] = vertices
                 offsets = self.sim.data.flexvert_xpos[vertices] - gripper_pos[None, :]
                 self._assist_offsets[idx] = offsets
+                # Store initial xpos for qpos-based manipulation
+                # flexvert_xpos = initial_xpos + qpos_offset, so we need initial_xpos
+                # to compute correct qpos values
+                self._assist_initial_xpos[idx] = self.sim.data.flexvert_xpos[vertices].copy()
+
             elif not closing and idx in self._assist_vertices:
                 # Gripper is opening - release vertices
                 self._assist_vertices.pop(idx, None)
                 self._assist_offsets.pop(idx, None)
+                self._assist_initial_xpos.pop(idx, None)
 
-        # Update positions of attached vertices
+    def _enforce_grasp_assist(self):
+        """Enforce grasp assist constraints after physics step.
+
+        This is called after the MuJoCo simulation step to override any
+        physics-computed vertex positions for pinned vertices.
+
+        Uses qpos-based manipulation since directly setting flexvert_xpos
+        is overwritten by mj_forward. The relationship is:
+            flexvert_xpos = initial_xpos + qpos_offset
+        where initial_xpos is the position at qpos=0 (from model definition).
+        """
+        if not self.grasp_assist:
+            return
+        if not self._assist_vertices:
+            return
+        if self._cloth_qpos_start is None:
+            return
+
+        gripper_positions = self._get_gripper_positions()
+        if gripper_positions is None:
+            return
+
         for idx, vertices in self._assist_vertices.items():
             offsets = self._assist_offsets.get(idx)
-            if offsets is None:
+            initial_xpos = self._assist_initial_xpos.get(idx)
+            if offsets is None or initial_xpos is None or idx >= len(gripper_positions):
                 continue
+
             gripper_pos = gripper_positions[idx]
-            self.sim.data.flexvert_xpos[vertices] = gripper_pos[None, :] + offsets
-            if hasattr(self.sim.data, "flexvert_xvel"):
-                self.sim.data.flexvert_xvel[vertices] = 0.0
+            # Compute desired vertex positions (gripper_pos + offset from when grasped)
+            desired_xpos = gripper_pos[None, :] + offsets
+
+            # Get current qpos for these vertices to determine initial model positions
+            # The initial model position is: initial_xpos_model = flexvert_xpos - qpos_offset
+            # But we stored initial_xpos when we first pinned, which was the flexvert_xpos at that time
+            # Since we want to move vertices to follow gripper, we need to set qpos such that:
+            #   flexvert_xpos = initial_model_xpos + qpos = desired_xpos
+            #   qpos = desired_xpos - initial_model_xpos
+            # The initial_model_xpos (xpos when qpos=0) can be computed from:
+            #   initial_xpos = initial_model_xpos + qpos_at_pin_time
+            # But since we pinned when cloth was near rest (qpos~0), initial_xpos ≈ initial_model_xpos
+
+            # For each vertex, set its qpos to move it to desired position
+            for i, vert_idx in enumerate(vertices):
+                # Cloth vertex vert_idx maps to qpos starting at _cloth_qpos_start
+                # Each vertex has 3 DOF (x, y, z)
+                local_idx = vert_idx
+                if self._cloth_vert_slice is not None:
+                    local_idx = vert_idx - self._cloth_vert_slice.start
+                qpos_idx = self._cloth_qpos_start + local_idx * 3
+
+                # Compute qpos offset to achieve desired position
+                # qpos = desired_xpos - initial_model_xpos
+                # Using initial_xpos as approximation of initial_model_xpos
+                qpos_offset = desired_xpos[i] - initial_xpos[i]
+                self.sim.data.qpos[qpos_idx:qpos_idx+3] = qpos_offset
+
+                # Also zero the velocity
+                if self.sim.model.nv > qpos_idx + 2:
+                    self.sim.data.qvel[qpos_idx:qpos_idx+3] = 0.0
 
     @staticmethod
     def _extract_corners(vertices: np.ndarray) -> np.ndarray:
@@ -425,11 +568,33 @@ class TwoArmClothFold(TwoArmEnv):
         super()._pre_action(action, policy_step)
         self._update_grasp_assist(action)
 
+    def _post_action(self, action):
+        """Called after simulation step to enforce grasp assist constraints."""
+        result = super()._post_action(action)
+        # Re-apply vertex pinning after physics step to ensure cloth follows gripper
+        self._enforce_grasp_assist()
+        return result
+
     def _reset_internal(self):
         """Reset internal state variables."""
         super()._reset_internal()
         self._assist_vertices = {}
         self._assist_offsets = {}
+        self._assist_initial_xpos = {}
+
+
+        if self.env_configuration == "parallel":
+            joint1_rotations = [0, 0]  # Robot1 needs more rotation to match Robot0
+            for i, rotation in enumerate(joint1_rotations):
+                joint_name = f"robot{i}_joint1"
+                try:
+                    addr = self.sim.model.get_joint_qpos_addr(joint_name)
+                    if isinstance(addr, tuple):
+                        addr = addr[0]
+                    self.sim.data.qpos[addr] = rotation
+                except (ValueError, KeyError):
+                    pass  # Joint not found, skip
+            self.sim.forward()
 
         # Apply cloth position noise if enabled
         if self.cloth_noise and hasattr(self.sim.data, "flexvert_xpos"):

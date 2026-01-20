@@ -220,6 +220,8 @@ def create_bimanual_env(
     camera_names: CameraNames = None,
     render_camera: Optional[str] = None,
     cloth_preset: str = "medium",
+    grasp_assist: bool = True,
+    cloth_x_offset: Optional[float] = None,
 ):
     """
     Create a bimanual robosuite environment.
@@ -236,6 +238,121 @@ def create_bimanual_env(
     Returns:
         Robosuite environment
     """
+    # Register Piper robot early (before any env creation)
+    from pathlib import Path
+    from robosuite.robots import ROBOT_CLASS_MAPPING, FixedBaseRobot
+    from robosuite.models.robots.robot_model import REGISTERED_ROBOTS
+    from robosuite.models.robots.manipulators.manipulator_model import ManipulatorModel
+
+    # Import PiperGripper to register it with GRIPPER_MAPPING
+    from robots.piper import PiperGripper  # noqa: F401
+
+    if "Piper" not in REGISTERED_ROBOTS:
+        # Compute absolute path to MJCF file (script dir / assets / mjcf / piper)
+        piper_xml_path = str(
+            Path(__file__).resolve().parent
+            / "assets"
+            / "mjcf"
+            / "piper"
+            / "piper_description.xml"
+        )
+
+        # Create Piper class dynamically using the MJCF file
+        class Piper(ManipulatorModel):
+            """Piper 6-DoF arm from AgileX Robotics with integrated parallel gripper."""
+
+            arms = ["right"]
+
+            def __init__(self, idn=0):
+                super().__init__(piper_xml_path, idn=idn)
+                # Balanced damping to reduce oscillation (was [300,100,20,5,2,0.1,100,100])
+                # The extreme asymmetry (300:0.1 = 3000x) caused jerky movements
+                self.set_joint_attribute(
+                    attrib="damping",
+                    values=np.array([10, 8, 5, 3, 2, 1, 5, 5]),
+                )
+
+            @property
+            def default_base(self):
+                return "NullMount"
+
+            @property
+            def default_gripper(self):
+                # Use PiperGripper which reports 1 DOF for the integrated gripper
+                # The gripper geometry is already in the MJCF (joint7 controls opening)
+                return {"right": "PiperGripper"}  # type: ignore[return-value]
+
+            @property
+            def default_controller_config(self):
+                return {
+                    "type": "BASIC",
+                    "body_parts": {
+                        "arms": {
+                            "right": {
+                                "type": "OSC_POSITION",
+                                "input_max": 1,
+                                "input_min": -1,
+                                "output_max": [0.05, 0.05, 0.05],
+                                "output_min": [-0.05, -0.05, -0.05],
+                                "kp": 30,  # Reduced from 150 to limit torques
+                                "damping_ratio": 1,
+                                "impedance_mode": "fixed",
+                                "kp_limits": [0, 300],
+                                "damping_ratio_limits": [0, 10],
+                                "position_limits": None,
+                                "uncouple_pos_ori": True,
+                                "input_type": "delta",
+                                "input_ref_frame": "world",  # Use world frame for easier bimanual control
+                                "interpolation": None,
+                                "ramp_ratio": 0.5,  # Increased from 0.2 for smoother acceleration
+                                "gripper": None,
+                            },
+                        },
+                    },
+                }
+
+            @property
+            def init_qpos(self):
+                # Initialize gripper at mid-range for symmetric finger positions
+                # joint7=0.0175 (mid of [0, 0.035]), joint8=-0.0175 (mid of [-0.035, 0])
+                # This satisfies the equality constraint: joint8 = -joint7
+                # and ensures both fingers start at visually identical positions
+                return np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0175, -0.0175])
+
+            @property
+            def base_xpos_offset(self):
+                return {
+                    "empty": (-0.6, 0, 0),
+                    # Piper is table-mounted: z=0.825 positions base_link on table surface
+                    "table": lambda length: (-0.16 - length / 2, 0, 0.825),
+                }
+
+            @property
+            def top_offset(self):
+                return np.array([0, 0, 1.0])
+
+            @property
+            def _horizontal_radius(self):
+                return 0.5
+
+            @property
+            def arm_type(self):
+                return "single"
+
+            @property
+            def _eef_name(self):
+                # Use link6 (gripper base) as EEF reference to avoid asymmetry
+                # when robots are placed facing each other. Link6 doesn't move
+                # when the gripper opens/closes, providing a stable reference point.
+                # Previously link8 (gripper finger) was used, but this created
+                # asymmetric EEF positions because both robots have the same joint
+                # angles but face opposite directions.
+                return {"right": "link6"}
+
+        # Register in both mappings
+        REGISTERED_ROBOTS["Piper"] = Piper
+        ROBOT_CLASS_MAPPING["Piper"] = FixedBaseRobot
+
     if task == "TwoArmClothFold":
         from envs.two_arm_cloth_fold import TwoArmClothFold
 
@@ -249,9 +366,40 @@ def create_bimanual_env(
             render_camera = "bimanual_view"
         if render_camera == FREE_CAMERA_NAME:
             render_camera = None
-        return TwoArmClothFold(
+
+        # Build controller config with world frame for bimanual cloth manipulation
+        # Use OSC_POSE for position + orientation control
+        # World frame is easier for coordinated bimanual motion
+        controller_config = {
+            "type": "BASIC",
+            "body_parts": {
+                "right": {
+                    "type": "OSC_POSE",
+                    "input_max": 1,
+                    "input_min": -1,
+                    "output_max": [0.05, 0.05, 0.05, 0.5, 0.5, 0.5],
+                    "output_min": [-0.05, -0.05, -0.05, -0.5, -0.5, -0.5],
+                    "kp": 30,
+                    "damping_ratio": 1,
+                    "impedance_mode": "fixed",
+                    "kp_limits": [0, 300],
+                    "damping_ratio_limits": [0, 10],
+                    "position_limits": None,
+                    "orientation_limits": None,
+                    "uncouple_pos_ori": True,
+                    "input_type": "delta",
+                    "input_ref_frame": "world",  # World frame for bimanual
+                    "interpolation": None,
+                    "ramp_ratio": 0.5,
+                    "gripper": {"type": "GRIP"},
+                },
+            },
+        }
+
+        env_kwargs = dict(
             robots=robots_list,
             env_configuration="parallel",
+            controller_configs=controller_config,
             has_renderer=has_renderer,
             has_offscreen_renderer=has_offscreen_renderer,
             use_camera_obs=use_camera_obs,
@@ -261,7 +409,11 @@ def create_bimanual_env(
             horizon=500,
             ignore_done=ignore_done,
             cloth_preset=cloth_preset,
+            grasp_assist=grasp_assist,
         )
+        if cloth_x_offset is not None:
+            env_kwargs["cloth_x_offset"] = cloth_x_offset
+        return TwoArmClothFold(**env_kwargs)
 
     # Load composite controller config (robosuite >= 1.5)
     controller_name = _resolve_controller_name(controller)
@@ -361,18 +513,41 @@ class BimanualDataCollector:
         if self.current_episode is None:
             return
 
-        # Store observation
+        # Get actual DoF from environment for DoF-agnostic handling
+        joint_dof = 7  # Default for 7-DoF robots
+        gripper_dof = 2  # Default gripper
+
+        # Try to get DoF from environment
+        try:
+            joint_dof = (
+                self.env.robots[0].dof
+                if hasattr(self.env, "robots") and self.env.robots
+                else joint_dof
+            )
+            gripper_dof = (
+                self.env.robots[0].gripper[self.env.robots[0].arms[0]].dof
+                if hasattr(self.env, "robots") and self.env.robots
+                else gripper_dof
+            )
+        except Exception:
+            pass  # Use defaults
+
+        # Store observation with dynamic DoF
         obs_data = {
-            "robot0_joint_pos": obs.get("robot0_joint_pos", np.zeros(7)),
-            "robot0_joint_vel": obs.get("robot0_joint_vel", np.zeros(7)),
+            "robot0_joint_pos": obs.get("robot0_joint_pos", np.zeros(joint_dof)),
+            "robot0_joint_vel": obs.get("robot0_joint_vel", np.zeros(joint_dof)),
             "robot0_eef_pos": obs.get("robot0_eef_pos", np.zeros(3)),
             "robot0_eef_quat": obs.get("robot0_eef_quat", np.zeros(4)),
-            "robot0_gripper_qpos": obs.get("robot0_gripper_qpos", np.zeros(2)),
-            "robot1_joint_pos": obs.get("robot1_joint_pos", np.zeros(7)),
-            "robot1_joint_vel": obs.get("robot1_joint_vel", np.zeros(7)),
+            "robot0_gripper_qpos": obs.get(
+                "robot0_gripper_qpos", np.zeros(gripper_dof)
+            ),
+            "robot1_joint_pos": obs.get("robot1_joint_pos", np.zeros(joint_dof)),
+            "robot1_joint_vel": obs.get("robot1_joint_vel", np.zeros(joint_dof)),
             "robot1_eef_pos": obs.get("robot1_eef_pos", np.zeros(3)),
             "robot1_eef_quat": obs.get("robot1_eef_quat", np.zeros(4)),
-            "robot1_gripper_qpos": obs.get("robot1_gripper_qpos", np.zeros(2)),
+            "robot1_gripper_qpos": obs.get(
+                "robot1_gripper_qpos", np.zeros(gripper_dof)
+            ),
         }
 
         # Add camera images
@@ -789,6 +964,56 @@ def simple_demo(task: str = "TwoArmLift", robot: str = "Panda"):
     env.close()
 
 
+def test_gripper_control(task: str = "TwoArmClothFold", robot: str = "Piper"):
+    """Test gripper open/close to verify sign convention for Piper robot.
+
+    Run this to determine the correct gripper control signs for the robot.
+    The function will open and close the gripper, asking for confirmation.
+    """
+    print("\n" + "=" * 60)
+    print("GRIPPER CONTROL DIAGNOSTIC")
+    print("=" * 60)
+    print(f"Robot: {robot}")
+    print("This test will verify gripper control signs.")
+    print("Close the window to exit.\n")
+
+    env = create_bimanual_env(
+        robots=robot,
+        task=task,
+        has_renderer=True,
+        has_offscreen_renderer=False,
+        use_camera_obs=False,
+        render_camera="bimanual_view",
+    )
+
+    obs = env.reset()
+    env.render()
+
+    print("\n[Step 1] Testing gripper OPEN (action = -1.0)...")
+    # Open gripper with negative value
+    action = np.zeros(env.action_dim)
+    action[-1] = -1.0  # Last dimension is gripper for single arm
+    for _ in range(10):
+        obs, _, _, _ = env.step(action)
+        env.render()
+
+    input("\n>>> Gripper should be OPEN. Press Enter to test CLOSE...")
+
+    print("\n[Step 2] Testing gripper CLOSE (action = 1.0)...")
+    # Close gripper with positive value
+    action[-1] = 1.0
+    for _ in range(10):
+        obs, _, _, _ = env.step(action)
+        env.render()
+
+    input("\n>>> Gripper should be CLOSED. Press Enter to exit...")
+
+    env.close()
+    print(
+        "\nDiagnostic complete. Note which sign (positive/negative) works for your robot."
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Bimanual data collection with robosuite"
@@ -804,7 +1029,7 @@ def main():
         "--robot",
         type=str,
         default="Panda",
-        choices=["Panda", "UR5e", "Sawyer", "IIWA", "Jaco", "Kinova3"],
+        choices=["Panda", "UR5e", "Sawyer", "IIWA", "Jaco", "Kinova3", "Piper"],
         help="Robot type",
     )
     parser.add_argument(
@@ -872,6 +1097,11 @@ def main():
         choices=["fast", "medium", "realistic", "legacy"],
         help="Cloth simulation preset for TwoArmClothFold (fast=9x9, medium=15x15, realistic=21x21)",
     )
+    parser.add_argument(
+        "--test_gripper",
+        action="store_true",
+        help="Test gripper open/close control signs for Piper robot",
+    )
 
     args = parser.parse_args()
 
@@ -888,7 +1118,9 @@ def main():
 
     practice_mode = args.practice or args.ignore_done
 
-    if args.demo:
+    if args.test_gripper:
+        test_gripper_control(args.task, args.robot)
+    elif args.demo:
         simple_demo(args.task, args.robot)
     elif args.device == "spacemouse":
         run_spacemouse_collection(

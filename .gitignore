@@ -76,6 +76,7 @@ coverage.xml
 secrets.yaml
 *.secrets
 config.local.*
+CLAUDE.md
 
 # ===============================================
 # Mujoco/Robosuite specific

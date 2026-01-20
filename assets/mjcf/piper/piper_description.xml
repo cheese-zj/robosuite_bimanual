@@ -1,0 +1,124 @@
+<mujoco model="piper_description">
+  <compiler angle="radian" />
+  <size njmax="500" nconmax="100" />
+
+  <asset>
+    <!-- Base material: Light blue-gray (original Piper color) -->
+    <material name="base_material" rgba="0.792156862745098 0.819607843137255 0.933333333333333 1" specular="0.5" shininess="0.5" />
+    <!-- Metal material: Brushed aluminum look for arm links -->
+    <material name="metal_material" rgba="0.7 0.72 0.75 1" specular="0.8" shininess="0.9" reflectance="0.3" />
+    <!-- Accent material: Slightly darker for visual contrast on joints -->
+    <material name="accent_material" rgba="0.55 0.58 0.65 1" specular="0.6" shininess="0.7" />
+    <!-- Gripper material: Dark plastic look for gripper fingers -->
+    <material name="gripper_material" rgba="0.25 0.25 0.28 1" specular="0.3" shininess="0.4" />
+    <!-- Link6 material: Lighter accent as in original URDF -->
+    <material name="link6_material" rgba="0.898039215686275 0.917647058823529 0.929411764705882 1" specular="0.5" shininess="0.5" />
+    <material name="default_material" rgba="0.7 0.7 0.7 1" />
+    <material name="collision_material" rgba="1.0 0.28 0.1 0.9" />
+    <mesh name="base_link" file="meshes/base_link.STL" />
+    <mesh name="link1" file="meshes/link1.STL" />
+    <mesh name="link2" file="meshes/link2.STL" />
+    <mesh name="link3" file="meshes/link3.STL" />
+    <mesh name="link4" file="meshes/link4.STL" />
+    <mesh name="link5" file="meshes/link5.STL" />
+    <mesh name="link6" file="meshes/link6.STL" />
+    <mesh name="gripper_base" file="meshes/gripper_base.STL" />
+    <mesh name="link7" file="meshes/link7.STL" />
+    <mesh name="link8" file="meshes/link8.STL" />
+  </asset>
+
+  <worldbody>
+    <body name="base_link" pos="0.00000000 0.00000000 0.00000000" quat="1 0 0 0">
+      <!-- Fixed base (table-mounted, no freejoint) -->
+      <geom name="base_link_collision" pos="0 0 0" quat="1.0 0.0 0.0 0.0" type="mesh" mesh="base_link" contype="0" conaffinity="1" group="1" />
+      <geom name="base_link_visual" pos="0 0 0" quat="1.0 0.0 0.0 0.0" material="base_material" type="mesh" mesh="base_link" contype="0" conaffinity="0" group="2" />
+      <body name="link1" pos="0 0 0.123" quat="1.0 0.0 0.0 0.0">
+        <site name="right_center" pos="0 0 0" size="0.01" rgba="1 0.3 0.3 1" group="2"/>
+        <joint name="joint1" pos="0 0 0" axis="0 0 1" limited="true" range="-2.618 2.168" damping="300"/>
+        <inertial pos="0.000121504734057468 0.000104632162460536 -0.00438597309559853" quat="1.0 0.0 0.0 0.0" mass="0.71" diaginertia="0.00048916 0.00040472 0.00043982" />
+        <geom name="link1_collision" pos="0 0 0" quat="1.0 0.0 0.0 0.0" type="mesh" mesh="link1" contype="0" conaffinity="1" group="1" />
+        <geom name="link1_visual" pos="0 0 0" quat="1.0 0.0 0.0 0.0" material="base_material" type="mesh" mesh="link1" contype="0" conaffinity="0" group="2" />
+        <body name="link2" pos="0 0 0" quat="0.0356735 -0.0356786 -0.706207 -0.706205">
+          <joint name="joint2" pos="0 0 0" axis="0 0 1" limited="true" range="0 3.14" damping="100"/>
+          <inertial pos="0.198666145229743 -0.010926924140076 0.00142121714502687" quat="1.0 0.0 0.0 0.0" mass="1.17" diaginertia="0.00116918 0.06785384 0.06774489" />
+          <geom name="link2_collision" pos="0 0 0" quat="1.0 0.0 0.0 0.0" type="mesh" mesh="link2" contype="0" conaffinity="1" group="1" />
+          <geom name="link2_visual" pos="0 0 0" quat="1.0 0.0 0.0 0.0" material="base_material" type="mesh" mesh="link2" contype="0" conaffinity="0" group="2" />
+          <body name="link3" pos="0.28503 0 0" quat="0.637536 0 0 -0.77042">
+            <joint name="joint3" pos="0 0 0" axis="0 0 1" limited="true" range="-2.967 0" damping="20"/>
+            <inertial pos="-0.0202737662122021 -0.133914995944595 -0.000458682652737356" quat="1.0 0.0 0.0 0.0" mass="0.5" diaginertia="0.01361711 0.00045024 0.01380322" />
+            <geom name="link3_collision" pos="0 0 0" quat="1.0 0.0 0.0 0.0" type="mesh" mesh="link3" contype="0" conaffinity="1" group="1" />
+            <geom name="link3_visual" pos="0 0 0" quat="1.0 0.0 0.0 0.0" material="base_material" type="mesh" mesh="link3" contype="0" conaffinity="0" group="2" />
+            <body name="link4" pos="-0.021984 -0.25075 0" quat="0.707105 0.707108 0 0">
+              <joint name="joint4" pos="0 0 0" axis="0 0 1" limited="true" range="-1.745 1.745" damping="5"/>
+              <inertial pos="-9.66635791618542E-05 0.000876064475651083 -0.00496880904640868" quat="1.0 0.0 0.0 0.0" mass="0.38" diaginertia="0.00018501 0.00018965 0.00015484" />
+              <geom name="link4_collision" pos="0 0 0" quat="1.0 0.0 0.0 0.0" type="mesh" mesh="link4" contype="0" conaffinity="1" group="1" />
+              <geom name="link4_visual" pos="0 0 0" quat="1.0 0.0 0.0 0.0" material="base_material" type="mesh" mesh="link4" contype="0" conaffinity="0" group="2" />
+              <body name="link5" pos="0 0 0" quat="0.707105 -0.707108 0 0">
+                <joint name="joint5" pos="0 0 0" axis="0 0 1" limited="true" range="-1.22 1.22" damping="2"/>
+                <inertial pos="-4.10554118924211E-05 -0.0566486692356075 -0.0037205791677906" quat="1.0 0.0 0.0 0.0" mass="0.383" diaginertia="0.00166169 0.0001851 0.00164321" />
+                <geom name="link5_collision" pos="0 0 0" quat="1.0 0.0 0.0 0.0" type="mesh" mesh="link5" contype="0" conaffinity="1" group="1" />
+                <geom name="link5_visual" pos="0 0 0" quat="1.0 0.0 0.0 0.0" material="base_material" type="mesh" mesh="link5" contype="0" conaffinity="0" group="2" />
+                <body name="link6" pos="8.8259e-05 -0.091 0" quat="0.707105 0.707108 0 0">
+                  <joint name="joint6" pos="0 0 0" axis="0 0 1" limited="true" range="-2.0944 2.0944" damping="0.1"/>
+                  <inertial pos="-0.000179422 7.72241e-05 0.0305765" quat="0.498967 0.497649 -0.502223 0.501147" mass="0.152309" diaginertia="0.000119759 0.000110059 4.99704e-05" />
+                  <!-- link6 visual mesh (lighter color) -->
+                  <geom name="link6_collision" pos="0 0 0" quat="1.0 0.0 0.0 0.0" type="mesh" mesh="link6" contype="0" conaffinity="1" group="1" />
+                  <geom name="link6_visual" pos="0 0 0" quat="1.0 0.0 0.0 0.0" material="link6_material" type="mesh" mesh="link6" contype="0" conaffinity="0" group="2" />
+                  <!-- gripper_base as geom attached to link6 (not a separate body) -->
+                  <geom name="gripper_base_collision" pos="0 0 0" quat="1.0 0.0 0.0 0.0" type="mesh" mesh="gripper_base" contype="0" conaffinity="1" group="1" />
+                  <geom name="gripper_base_visual" pos="0 0 0" quat="1.0 0.0 0.0 0.0" material="base_material" type="mesh" mesh="gripper_base" contype="0" conaffinity="0" group="2" />
+                  <!-- Gripper center site for EEF tracking - fixed point at grasp location -->
+                  <site name="grip_site" pos="0 0 0.1358" size="0.005" rgba="0 1 0 0.5" group="1"/>
+                  <!-- Left finger with its own prismatic joint -->
+                  <body name="link7" pos="0 0 0.1358" quat="0.707105 0.707108 0 0">
+                    <inertial pos="0.000651232 -0.049193 0.00972259" quat="0.519774 0.479905 -0.436488 0.555881" mass="0.0303535" diaginertia="1.60353e-05 1.14217e-05 5.97329e-06" />
+                    <joint name="joint7" pos="0 0 0" axis="0 0 1" type="slide" limited="true" range="0 0.035" damping="100"/>
+                    <geom name="link7_collision" pos="0 0 0" quat="1.0 0.0 0.0 0.0" type="mesh" mesh="link7" contype="1" conaffinity="1" group="1" />
+                    <geom name="link7_visual" pos="0 0 0" quat="1.0 0.0 0.0 0.0" material="gripper_material" type="mesh" mesh="link7" contype="0" conaffinity="0" group="2" />
+                  </body>
+                  <!-- Right finger with its own prismatic joint (opposite axis direction) -->
+                  <body name="link8" pos="0 0 0.1358" quat="-2.59734e-06 -2.59735e-06 -0.707108 -0.707105">
+                    <inertial pos="0.000651232 -0.049193 0.00972259" quat="0.519774 0.479905 -0.436488 0.555881" mass="0.0303535" diaginertia="1.60353e-05 1.14217e-05 5.97329e-06" />
+                    <joint name="joint8" pos="0 0 0" axis="0 0 -1" type="slide" limited="true" range="-0.035 0" damping="100"/>
+                    <geom name="link8_collision" pos="0 0 0" quat="1.0 0.0 0.0 0.0" type="mesh" mesh="link8" contype="1" conaffinity="1" group="1" />
+                    <geom name="link8_visual" pos="0 0 0" quat="1.0 0.0 0.0 0.0" material="gripper_material" type="mesh" mesh="link8" contype="0" conaffinity="0" group="2" />
+                  </body>
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <!-- Torque-controlled actuators (like Panda) for OSC compatibility -->
+    <motor ctrllimited="true" ctrlrange="-80.0 80.0" joint="joint1" name="torq_j1"/>
+    <motor ctrllimited="true" ctrlrange="-80.0 80.0" joint="joint2" name="torq_j2"/>
+    <motor ctrllimited="true" ctrlrange="-80.0 80.0" joint="joint3" name="torq_j3"/>
+    <motor ctrllimited="true" ctrlrange="-80.0 80.0" joint="joint4" name="torq_j4"/>
+    <motor ctrllimited="true" ctrlrange="-80.0 80.0" joint="joint5" name="torq_j5"/>
+    <motor ctrllimited="true" ctrlrange="-12.0 12.0" joint="joint6" name="torq_j6"/>
+    <motor ctrllimited="true" ctrlrange="-10.0 10.0" joint="joint7" name="torq_j7"/>
+    <motor ctrllimited="true" ctrlrange="-10.0 10.0" joint="joint8" name="torq_j8"/>
+  </actuator>
+
+  <contact>
+    <exclude body1="base_link" body2="link1" />
+    <exclude body1="link1" body2="link2" />
+    <exclude body1="link2" body2="link3" />
+    <exclude body1="link3" body2="link4" />
+    <exclude body1="link4" body2="link5" />
+    <exclude body1="link5" body2="link6" />
+    <exclude body1="link6" body2="link7" />
+    <exclude body1="link6" body2="link8" />
+    <exclude body1="link7" body2="link8" />
+  </contact>
+
+  <!-- Couple joint7 and joint8 so they move together (mirrored parallel gripper) -->
+  <!-- When joint7 moves +0.035, joint8 moves -0.035 (opposite direction) -->
+  <equality>
+    <joint joint1="joint7" joint2="joint8" polycoef="0 -1 0 0 0" />
+  </equality>
+</mujoco>
