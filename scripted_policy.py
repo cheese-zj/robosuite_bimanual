@@ -117,18 +117,21 @@ class ScriptedBimanualPolicy:
 
 @dataclass
 class ClothFoldPolicyConfig:
-    approach_height: float = 0.025  # Slightly higher for Piper clearance
-    grasp_height: float = 0.0  # At cloth level for contact
+    # Top-down approach: start high, descend slowly to contact cloth
+    approach_height: float = 0.06  # Higher start for top-down approach (was 0.025)
+    descend_height: float = 0.02  # Height to start closing gripper during descent
+    grasp_height: float = 0.005  # Slightly above cloth for contact (not below - table is at Z=0.8)
     lift_height: float = 0.05  # Moderate lift - enough clearance (Piper shorter reach)
     fold_height: float = 0.08  # Slightly lower for Piper center of mass
     retreat_height: float = 0.12  # Height to retreat after release
     pos_gain: float = 1.0
     max_delta: float = 0.04
     grasp_dist_threshold: float = 0.06  # Increased for Piper shorter reach
-    approach_steps: int = 12  # Fewer steps (Piper faster joints)
+    approach_steps: int = 20  # More steps for higher approach
     settle_steps: int = 8  # Less settling needed
-    grasp_steps: int = 15  # Faster gripper response on Piper
-    lift_steps: int = 15
+    descend_steps: int = 25  # New phase: slow descent with gripper closing
+    grasp_steps: int = 20  # Dwell at grasp position to establish friction contact
+    lift_steps: int = 20  # Slower lift to maintain grip
     fold_steps: int = 35  # Slightly faster fold (Piper 225°/s joints)
     release_steps: int = 8
     retreat_steps: int = 10  # Faster retreat
@@ -138,8 +141,9 @@ class ClothFoldPolicyConfig:
     grasp_inward_offset: float = 0.025  # 2.5cm toward cloth center (Piper parallel jaw)
     position_tolerance: float = 0.025  # 2.5cm - arms within this distance = converged
     min_settle_steps: int = 4
-    min_grasp_steps: int = 10
-    min_lift_steps: int = 8
+    min_descend_steps: int = 15  # Minimum descent steps for gripper to close
+    min_grasp_steps: int = 15  # Longer dwell to establish friction contact
+    min_lift_steps: int = 10  # Slower lift
     min_fold_steps: int = 18
     min_release_steps: int = 4
     min_retreat_steps: int = 5
@@ -350,11 +354,41 @@ class ScriptedClothFoldPolicy:
                 self.config.settle_steps,
                 "settle",
             ):
+                self.phase = "descend"
+                self.phase_step = 0
+
+        elif self.phase == "descend":
+            # Top-down approach: slowly descend while gradually closing gripper
+            # This allows gripper to contact cloth and press it against the table
+            target0 = grasp_pos0.copy()
+            target0[2] = left_corner[2] + self.config.grasp_height  # Target is at/below cloth
+            target1 = grasp_pos1.copy()
+            target1[2] = right_corner[2] + self.config.grasp_height
+
+            # Gradually close gripper during descent (0 to 1 over descend_steps)
+            gripper_progress = min(1.0, self.phase_step / max(1, self.config.descend_steps * 0.7))
+            gripper = self.config.open_gripper + gripper_progress * (
+                self.config.close_gripper - self.config.open_gripper
+            )
+
+            if self.debug and self.phase_step % 5 == 0:
+                print(f"  [Descend] Step {self.phase_step}: gripper={gripper:.2f}, target_z={target0[2]:.4f}")
+
+            if self._check_phase_complete(
+                eef0,
+                target0,
+                eef1,
+                target1,
+                self.config.min_descend_steps,
+                self.config.descend_steps,
+                "descend",
+            ):
                 self.phase = "grasp"
                 self.phase_step = 0
 
         elif self.phase == "grasp":
-            # Grasp at inward-offset positions (within robot reach)
+            # Dwell at grasp position with closed gripper to establish friction contact
+            # Gripper is pressing cloth against table - hold to let friction stabilize
             target0 = grasp_pos0.copy()
             target0[2] = left_corner[2] + self.config.grasp_height
             target1 = grasp_pos1.copy()

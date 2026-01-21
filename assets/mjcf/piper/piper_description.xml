@@ -72,16 +72,33 @@
                   <!-- Left finger with its own prismatic joint -->
                   <body name="link7" pos="0 0 0.1358" quat="0.707105 0.707108 0 0">
                     <inertial pos="0.000651232 -0.049193 0.00972259" quat="0.519774 0.479905 -0.436488 0.555881" mass="0.0303535" diaginertia="1.60353e-05 1.14217e-05 5.97329e-06" />
-                    <joint name="joint7" pos="0 0 0" axis="0 0 1" type="slide" limited="true" range="0 0.035" damping="100"/>
-                    <geom name="link7_collision" pos="0 0 0" quat="1.0 0.0 0.0 0.0" type="mesh" mesh="link7" contype="1" conaffinity="1" group="1" />
+                    <joint name="joint7" pos="0 0 0" axis="0 0 1" type="slide" limited="true" range="0 0.035" damping="50"/>
+                    <!-- Visual mesh only (collision disabled) -->
                     <geom name="link7_visual" pos="0 0 0" quat="1.0 0.0 0.0 0.0" material="gripper_material" type="mesh" mesh="link7" contype="0" conaffinity="0" group="2" />
+                    <!-- Finger pad collision box with high friction for cloth grasping -->
+                    <!-- Position: inner surface of finger (facing link8), at fingertip -->
+                    <!-- In link7 local frame: -Y is along finger toward tip, Z faces inward toward link8 -->
+                    <!-- Moved to Y=-0.035 toward fingertip (was -0.045 which was too far inside) -->
+                    <geom name="link7_pad" type="box" size="0.008 0.015 0.004" pos="0.0 -0.015 0.004"
+                          contype="1" conaffinity="1" group="1"
+                          condim="4" friction="3.0 0.1 0.01"
+                          solref="0.005 1.0" solimp="0.95 0.99 0.001"
+                          rgba="0.8 0.2 0.2 0.8"/>
                   </body>
                   <!-- Right finger with its own prismatic joint (opposite axis direction) -->
                   <body name="link8" pos="0 0 0.1358" quat="-2.59734e-06 -2.59735e-06 -0.707108 -0.707105">
                     <inertial pos="0.000651232 -0.049193 0.00972259" quat="0.519774 0.479905 -0.436488 0.555881" mass="0.0303535" diaginertia="1.60353e-05 1.14217e-05 5.97329e-06" />
-                    <joint name="joint8" pos="0 0 0" axis="0 0 -1" type="slide" limited="true" range="-0.035 0" damping="100"/>
-                    <geom name="link8_collision" pos="0 0 0" quat="1.0 0.0 0.0 0.0" type="mesh" mesh="link8" contype="1" conaffinity="1" group="1" />
+                    <joint name="joint8" pos="0 0 0" axis="0 0 -1" type="slide" limited="true" range="-0.035 0" damping="50"/>
+                    <!-- Visual mesh only (collision disabled) -->
                     <geom name="link8_visual" pos="0 0 0" quat="1.0 0.0 0.0 0.0" material="gripper_material" type="mesh" mesh="link8" contype="0" conaffinity="0" group="2" />
+                    <!-- Finger pad collision box with high friction for cloth grasping (mirrored) -->
+                    <!-- Position: inner surface of finger (facing link7), at fingertip -->
+                    <!-- Moved to Y=-0.035 toward fingertip (was -0.045 which was too far inside) -->
+                    <geom name="link8_pad" type="box" size="0.008 0.015 0.004" pos="0.0 -0.015 0.004"
+                          contype="1" conaffinity="1" group="1"
+                          condim="4" friction="3.0 0.1 0.01"
+                          solref="0.005 1.0" solimp="0.95 0.99 0.001"
+                          rgba="0.8 0.2 0.2 0.8"/>
                   </body>
                 </body>
               </body>

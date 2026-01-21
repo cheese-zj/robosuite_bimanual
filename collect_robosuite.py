@@ -222,6 +222,10 @@ def create_bimanual_env(
     cloth_preset: str = "medium",
     grasp_assist: bool = True,
     cloth_x_offset: Optional[float] = None,
+    # Strict grasp-assist parameters
+    assist_strict: bool = False,
+    assist_z_tolerance: float = 0.02,
+    assist_xy_radius: float = 0.03,
 ):
     """
     Create a bimanual robosuite environment.
@@ -410,6 +414,9 @@ def create_bimanual_env(
             ignore_done=ignore_done,
             cloth_preset=cloth_preset,
             grasp_assist=grasp_assist,
+            assist_strict=assist_strict,
+            assist_z_tolerance=assist_z_tolerance,
+            assist_xy_radius=assist_xy_radius,
         )
         if cloth_x_offset is not None:
             env_kwargs["cloth_x_offset"] = cloth_x_offset

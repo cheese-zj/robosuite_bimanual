@@ -53,7 +53,7 @@ checkpoints/             # Trained models
 *.h5
 data/bimanual/
 MUJOCO_LOG.TXT
-
+recordings/
 # ===============================================
 # Cache and temporary files
 # ===============================================

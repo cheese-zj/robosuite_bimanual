@@ -63,10 +63,13 @@ class TwoArmClothFold(TwoArmEnv):
         cloth_config: Optional[ClothConfig] = None,
         cloth_offset: float = 0.01,
         cloth_x_offset: float = -0.05,  # Shift cloth toward robots for reachability
-        grasp_assist: bool = True,
+        grasp_assist: bool = False,  # Disabled by default - rely on physics-based friction grasping
         assist_radius: float = 0.15,
         assist_max_verts: int = 12,  # Increased for more stable cloth grip
         assist_action_threshold: float = 0.3,
+        assist_strict: bool = False,  # Use strict detection (tight tolerances)
+        assist_z_tolerance: float = 0.02,  # Vertical tolerance for strict mode (2cm)
+        assist_xy_radius: float = 0.03,  # Horizontal radius for strict mode (3cm)
         # Noise/randomization parameters
         cloth_noise: bool = False,  # Randomize cloth position on reset
         cloth_noise_std: float = 0.03,  # Standard deviation for cloth position noise (meters)
@@ -83,6 +86,9 @@ class TwoArmClothFold(TwoArmEnv):
         self.assist_radius = assist_radius
         self.assist_max_verts = assist_max_verts
         self.assist_action_threshold = assist_action_threshold
+        self.assist_strict = assist_strict
+        self.assist_z_tolerance = assist_z_tolerance
+        self.assist_xy_radius = assist_xy_radius
 
         # Noise/randomization parameters
         self.cloth_noise = cloth_noise
@@ -391,18 +397,23 @@ class TwoArmClothFold(TwoArmEnv):
 
 
             if closing and idx not in self._assist_vertices:
-                # Only pin if gripper is at cloth level (within 5cm vertically)
-                # This ensures gripper physically reaches the cloth before pinning
-                # Relaxed from 3cm to 5cm for more forgiving grasp triggering
+                # Use strict or relaxed tolerances based on config
+                if self.assist_strict:
+                    z_tolerance = self.assist_z_tolerance   # Default 2cm
+                    xy_radius = self.assist_xy_radius       # Default 3cm
+                else:
+                    z_tolerance = 0.05   # Legacy tolerance
+                    xy_radius = 0.10     # Legacy radius
+
+                # Only pin if gripper is at cloth level
                 gripper_z = gripper_pos[2]
                 z_distance = abs(gripper_z - cloth_z)
-                if z_distance > 0.05:  # Relaxed from 0.03 for more reliable pinning
+                if z_distance > z_tolerance:
                     # Gripper not at cloth level yet - don't pin
                     continue
 
                 # Gripper is at cloth level - find nearby vertices to attach
-                # Use larger radius to find candidates, then select closest ones
-                vertices = self._find_nearest_vertices(gripper_pos, radius=0.10)  # 10cm radius
+                vertices = self._find_nearest_vertices(gripper_pos, radius=xy_radius)
                 if vertices.size == 0:
                     continue
 
@@ -490,6 +501,11 @@ class TwoArmClothFold(TwoArmEnv):
                 # Also zero the velocity
                 if self.sim.model.nv > qpos_idx + 2:
                     self.sim.data.qvel[qpos_idx:qpos_idx+3] = 0.0
+
+        # Call forward to apply the qpos changes to the simulation state
+        # This updates flexvert_xpos to reflect the new vertex positions
+        if self._assist_vertices:
+            self.sim.forward()
 
     @staticmethod
     def _extract_corners(vertices: np.ndarray) -> np.ndarray:

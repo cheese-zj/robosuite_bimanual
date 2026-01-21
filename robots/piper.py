@@ -23,18 +23,19 @@ from robosuite.models.grippers import register_gripper
 
 @register_gripper
 class PiperGripper(GripperModel):
-    """Piper integrated gripper - 0 DOF (controlled via grasp_assist).
+    """Piper integrated gripper - 0 DOF for robosuite controller.
 
     The Piper robot has an integrated parallel jaw gripper where joint7 controls
     the finger opening. The geometry is in the arm's MJCF (not the gripper model).
 
-    For cloth manipulation, grasp_assist is used to pin cloth vertices to the
-    gripper. The gripper collision is enabled (contype=1) so the grippers visually
-    touch the cloth before the grasp_assist pins it.
+    For cloth manipulation, the gripper uses physics-based friction grasping:
+    - Finger pads have high friction box collision geometry
+    - Top-down approach to pinch cloth against the table
+    - Gripper is controlled via direct qpos manipulation (not robosuite controller)
 
-    Note: The gripper actuators (torq_j7, torq_j8) are in the arm MJCF, not
-    in the gripper model file, so robosuite's GRIP controller cannot control them.
-    Future work could add a custom gripper XML with proper actuator definitions.
+    Note: The gripper actuators (torq_j7, torq_j8) are in the arm MJCF, not in
+    the null_gripper.xml. Control is achieved by direct qpos manipulation in
+    the collection scripts (e.g., collect_piper_cloth_fold.py).
     """
 
     def __init__(self, idn=0):
@@ -45,16 +46,16 @@ class PiperGripper(GripperModel):
 
     @property
     def dof(self):
-        """Piper gripper uses grasp_assist, so 0 DOF for controller."""
+        """Piper gripper reports 0 DOF to robosuite (controlled via direct qpos)."""
         return 0
 
     @property
     def init_qpos(self):
-        """Gripper starts open (0 = fully open)."""
-        return np.array([0.0])
+        """Gripper starts open."""
+        return np.array([])
 
     def format_action(self, action):
-        """No gripper control - actions are ignored (grasp_assist handles grasping)."""
+        """No gripper action passed through robosuite controller."""
         return np.array([])
 
 

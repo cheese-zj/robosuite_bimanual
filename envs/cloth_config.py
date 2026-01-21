@@ -47,8 +47,9 @@ class ClothConfig:
 
     # Contact
     self_collide: str = "none"
-    contact_condim: int = 3
+    contact_condim: int = 4  # condim=4 enables torsional friction for better grip
     contact_solref: Tuple[float, float] = (0.005, 1.0)
+    contact_friction: Tuple[float, float, float] = (1.5, 0.05, 0.005)  # tangential, torsional, rolling
 
     # Visual
     rgba: Tuple[float, float, float, float] = (0.9, 0.3, 0.3, 1.0)
@@ -137,13 +138,15 @@ CLOTH_PRESETS: Dict[str, ClothConfig] = {
         count_y=13,  # Narrower for Piper reachability
         spacing=0.025,  # Same density as medium
         mass=0.12,
-        radius=0.001,
+        radius=0.003,  # Increased from 0.001 for better gripper contact area
         young=2e4,
         poisson=0.2,
         thickness=2e-3,
         edge_equality=True,
         edge_damping=0.15,
         self_collide="none",
+        contact_condim=4,  # Enable torsional friction for cloth grasping
+        contact_friction=(1.5, 0.05, 0.005),  # High tangential friction
         iterations=75,
     ),
 }
@@ -211,18 +214,19 @@ def generate_cloth_xml(
         f'                      {flexcomp_attrs[3]}>',
     ])
 
-    # Contact element
+    # Contact element with friction for physics-based grasping
     solref_str = f"{config.contact_solref[0]} {config.contact_solref[1]}"
+    friction_str = f"{config.contact_friction[0]} {config.contact_friction[1]} {config.contact_friction[2]}"
     if config.self_collide != "none":
         lines.append(
             f'                <contact selfcollide="{config.self_collide}" '
             f'condim="{config.contact_condim}" solref="{solref_str}" '
-            'contype="1" conaffinity="1"/>'
+            f'friction="{friction_str}" contype="1" conaffinity="1"/>'
         )
     else:
         lines.append(
             f'                <contact condim="{config.contact_condim}" '
-            f'solref="{solref_str}" contype="1" conaffinity="1"/>'
+            f'solref="{solref_str}" friction="{friction_str}" contype="1" conaffinity="1"/>'
         )
 
     # Edge element with damping (stiffness only available for dim=1, not 2D cloth)

@@ -15,13 +15,16 @@ Key fixes from original:
 Usage:
     python collect_piper_cloth_fold.py --render --debug           # Demo mode
     python collect_piper_cloth_fold.py --episodes 50              # Data collection
+    python collect_piper_cloth_fold.py --render --record          # Record video
 """
 
 from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
+from pathlib import Path
 from typing import Optional, Tuple
 
 import numpy as np
@@ -29,11 +32,62 @@ import numpy as np
 from collect_robosuite import create_bimanual_env
 
 
+def create_video_writer(output_path: str, fps: int = 30, frame_size: Tuple[int, int] = (512, 512)):
+    """Create an OpenCV video writer.
+
+    Args:
+        output_path: Path to output video file
+        fps: Frames per second
+        frame_size: (width, height) of video frames
+
+    Returns:
+        cv2.VideoWriter object or None if OpenCV not available
+    """
+    try:
+        import cv2
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        writer = cv2.VideoWriter(output_path, fourcc, float(fps), frame_size)
+        if writer.isOpened():
+            print(f"Video writer opened: {output_path}")
+            return writer
+        else:
+            print(f"Warning: Could not open video writer for {output_path}")
+            return None
+    except ImportError:
+        print("Warning: OpenCV not installed. Video recording disabled.")
+        print("Install with: pip install opencv-python")
+        return None
+
+
+def add_frame_to_video(writer, frame: np.ndarray):
+    """Add a frame to the video writer.
+
+    Args:
+        writer: cv2.VideoWriter object
+        frame: RGB image array (H, W, 3) uint8
+    """
+    if writer is None:
+        return
+    if frame is None or frame.size == 0:
+        return
+    try:
+        import cv2
+        # Ensure frame is uint8
+        if frame.dtype != np.uint8:
+            frame = (frame * 255).astype(np.uint8) if frame.max() <= 1.0 else frame.astype(np.uint8)
+        # Convert RGB to BGR for OpenCV
+        bgr_frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        writer.write(bgr_frame)
+    except Exception as e:
+        print(f"Warning: Could not write frame: {e}")
+
+
 class FoldPhase(Enum):
     """State machine phases for cloth folding."""
     APPROACH = "approach"    # Move to above grasp positions
     SETTLE = "settle"        # Stabilize at approach height
-    GRASP = "grasp"          # Lower to cloth and close grippers
+    DESCEND = "descend"      # NEW: Slow descent with gripper closing (top-down approach)
+    GRASP = "grasp"          # Dwell at grasp position to establish friction contact
     LIFT = "lift"            # Raise cloth edge
     FOLD = "fold"            # Move toward opposite side
     RELEASE = "release"      # Open grippers
@@ -52,12 +106,16 @@ class PiperClothFoldConfig:
     - Cloth corners at Y=±0.15m (narrower 30cm cloth for reachability)
     - Grasp targets at Y=±0.14m (1cm inward offset from corners)
 
+    Top-Down Approach: Start high, descend slowly while closing gripper,
+    press cloth against table to establish friction grip.
+
     Both arms can reach their targets within 2.5cm tolerance.
     """
     # Heights relative to cloth (cloth at Z=0.81)
     cloth_z: float = 0.81
-    approach_height: float = 0.03       # 3cm above cloth for approach
-    grasp_height: float = 0.0           # AT cloth level for reliable grasp_assist trigger
+    approach_height: float = 0.06       # 6cm above cloth for top-down approach (was 0.03)
+    descend_height: float = 0.02        # Height to start closing gripper during descent
+    grasp_height: float = 0.015         # 15mm above cloth (25mm above table to clear gripper fingers)
     lift_height: float = 0.10           # Lift to 10cm above cloth (safe margin for cloth sag)
     fold_height: float = 0.08           # Height during fold motion (8cm for clearance)
     release_height: float = 0.02        # Height when releasing
@@ -65,29 +123,32 @@ class PiperClothFoldConfig:
 
     # Inward offset toward cloth center (brings targets into workspace)
     # With bases at Y=±0.16 and joint1 rotations, EEF starts at ~Y=±0.11
-    # Cloth corners at Y=±0.15, grasp targets at Y=±0.14 (well within reach)
-    grasp_inward_offset: float = 0.01   # 1cm inward from corners
+    # Cloth corners at Y=±0.15, grasp targets at Y=±0.11 with 4cm offset
+    # Larger offset gives more kinematic slack for vertical (Z) descent
+    grasp_inward_offset: float = 0.04   # 4cm inward from corners (was 0.01)
 
     # Relaxed tolerances (increased from problematic 2cm)
     position_tolerance: float = 0.025   # 2.5cm for phase transitions
     grasp_dist_threshold: float = 0.06  # 6cm for approach phase
 
     # Phase timing (min/max steps)
-    # Increased values to ensure arms reach target heights before transitions
-    min_approach_steps: int = 30   # Increased for smoother approach
-    max_approach_steps: int = 200
+    # Reduced max_steps for position-based transitions (early exit on convergence)
+    min_approach_steps: int = 30   # Minimum for smooth approach
+    max_approach_steps: int = 150  # Reduced from 200
     min_settle_steps: int = 25     # More settling reduces oscillation
-    max_settle_steps: int = 60
-    min_grasp_steps: int = 80      # More time to descend and stabilize (increased from 50)
-    max_grasp_steps: int = 120     # Increased max to allow more descent time
-    min_lift_steps: int = 25       # More time to lift smoothly
-    max_lift_steps: int = 80
+    max_settle_steps: int = 40     # Reduced from 60
+    min_descend_steps: int = 25    # Slow descent for contact
+    max_descend_steps: int = 40    # Reduced from 60
+    min_grasp_steps: int = 30      # Dwell to establish grip
+    max_grasp_steps: int = 40      # Reduced from 60
+    min_lift_steps: int = 30       # Slower lift for stable grip
+    max_lift_steps: int = 60       # Reduced from 80
     min_fold_steps: int = 30
-    max_fold_steps: int = 100
+    max_fold_steps: int = 60       # Reduced from 100 - major time savings
     min_release_steps: int = 10
-    max_release_steps: int = 30
+    max_release_steps: int = 20    # Reduced from 30
     min_retreat_steps: int = 15
-    max_retreat_steps: int = 50
+    max_retreat_steps: int = 30    # Reduced from 50
 
     # OSC controller parameters
     osc_output_max: float = 0.05        # OSC position output scale
@@ -98,7 +159,7 @@ class PiperClothFoldConfig:
     gripper_open_action: float = -1.0
 
     # Fold target calculation
-    fold_overshoot: float = 0.05        # 5cm past center for complete fold
+    fold_overshoot: float = 0.02        # 2cm past center (minimal overshoot)
 
     # Dynamic cloth tracking parameters
     tracking_enabled: bool = True       # Enable dynamic tracking during approach
@@ -399,9 +460,9 @@ class PiperClothFoldPolicy:
             print(f"Phase transition: {self.phase.value} -> {new_phase.value} "
                   f"at step {self.phase_step}")
 
-        # Lock cloth tracking when entering GRASP phase
-        # This prevents tracking deformed cloth corners once we start grasping
-        if new_phase == FoldPhase.GRASP and self.config.lock_on_grasp:
+        # Lock cloth tracking when entering DESCEND phase
+        # This prevents tracking deformed cloth corners once we start descending
+        if new_phase == FoldPhase.DESCEND and self.config.lock_on_grasp:
             self._tracking_locked = True
             if self.debug:
                 print(f"  [Tracking locked] Final grasp targets:")
@@ -417,7 +478,7 @@ class PiperClothFoldPolicy:
         corners = np.asarray(obs["cloth_corners"]).reshape(4, 3)
 
         # Dynamic cloth tracking during APPROACH and SETTLE phases
-        # Once GRASP begins, targets are locked to prevent tracking deformed cloth
+        # Once DESCEND begins, targets are locked to prevent tracking deformed cloth
         should_track = (self.config.tracking_enabled and
                         not self._tracking_locked and
                         self.phase in [FoldPhase.APPROACH, FoldPhase.SETTLE])
@@ -477,19 +538,43 @@ class PiperClothFoldPolicy:
                 self.debug, "SETTLE"
             )
             if complete:
+                self._transition_to(FoldPhase.DESCEND)
+
+        elif self.phase == FoldPhase.DESCEND:
+            # Top-down approach: slowly descend while gradually closing gripper
+            # This allows gripper to contact cloth and press it against the table
+            target0 = self._grasp_pos0.copy()
+            target0[2] = self.config.cloth_z + self.config.grasp_height  # Target is at/below cloth
+            target1 = self._grasp_pos1.copy()
+            target1[2] = self.config.cloth_z + self.config.grasp_height
+
+            # Gradually close gripper during descent (from open to close over descend phase)
+            gripper_progress = min(1.0, self.phase_step / max(1, self.config.max_descend_steps * 0.7))
+            gripper = self.config.gripper_open_action + gripper_progress * (
+                self.config.gripper_close_action - self.config.gripper_open_action
+            )
+
+            if self.debug and self.phase_step % 10 == 0:
+                print(f"  [DESCEND] Step {self.phase_step}: gripper={gripper:.2f}, "
+                      f"eef0_z={eef0[2]:.4f}, target_z={target0[2]:.4f}")
+
+            complete, _ = check_phase_complete(
+                eef0, target0, eef1, target1, self.phase_step,
+                self.config.min_descend_steps, self.config.max_descend_steps,
+                self.config.position_tolerance,
+                self.debug, "DESCEND"
+            )
+            if complete:
                 self._transition_to(FoldPhase.GRASP)
 
         elif self.phase == FoldPhase.GRASP:
+            # Dwell at grasp position with closed gripper to establish friction contact
+            # Gripper is pressing cloth against table - hold to let friction stabilize
             target0 = self._grasp_pos0.copy()
             target0[2] = self.config.cloth_z + self.config.grasp_height
             target1 = self._grasp_pos1.copy()
             target1[2] = self.config.cloth_z + self.config.grasp_height
-            gripper = self.config.gripper_close_action  # Close gripper for grasp_assist
-
-            # For GRASP phase, also check that grippers are at cloth level (within 3cm)
-            # This is required for grasp_assist to pin the cloth vertices
-            z_at_cloth = (abs(eef0[2] - self.config.cloth_z) < 0.03 and
-                          abs(eef1[2] - self.config.cloth_z) < 0.03)
+            gripper = self.config.gripper_close_action  # Keep gripper closed
 
             complete, _ = check_phase_complete(
                 eef0, target0, eef1, target1, self.phase_step,
@@ -497,14 +582,7 @@ class PiperClothFoldPolicy:
                 self.config.position_tolerance,
                 self.debug, "GRASP"
             )
-            # Only transition if grippers are at cloth level
-            if complete and z_at_cloth:
-                self._transition_to(FoldPhase.LIFT)
-            elif self.phase_step >= self.config.max_grasp_steps:
-                # Force transition after max steps even if Z not at cloth
-                if self.debug and not z_at_cloth:
-                    print(f"  [Warning] GRASP max steps reached but Z not at cloth: "
-                          f"z0={eef0[2]:.3f} z1={eef1[2]:.3f} (cloth_z={self.config.cloth_z})")
+            if complete:
                 self._transition_to(FoldPhase.LIFT)
 
         elif self.phase == FoldPhase.LIFT:
@@ -619,7 +697,18 @@ def main():
                         help="Max steps per episode")
     parser.add_argument("--cloth_preset", type=str, default="piper",
                         help="Cloth configuration preset")
+    parser.add_argument("--record", action="store_true",
+                        help="Record video of the episode")
+    parser.add_argument("--record_path", type=str, default=None,
+                        help="Output path for recorded video (default: auto-generated)")
+    parser.add_argument("--record_fps", type=int, default=30,
+                        help="FPS for recorded video (default: 30)")
     args = parser.parse_args()
+
+    # Recording requires rendering
+    if args.record and not args.render:
+        print("Note: --record requires --render, enabling rendering...")
+        args.render = True
 
     print("\n" + "=" * 70)
     print(" PIPER CLOTH FOLD - Workspace-Aware Grasp Positioning")
@@ -628,10 +717,10 @@ def main():
     print("EEF starts at ~Y=±0.11m, cloth corners at Y=±0.15m, targets at Y=±0.14m")
     print("\nCreating environment (this may take a moment)...", flush=True)
 
-    # Create environment WITH grasp_assist enabled
-    # grasp_assist pins cloth vertices to gripper when gripper closes near cloth
-    # cloth_x_offset=0.05 moves cloth further from robots to accommodate tool_offset_x
-    # This positions cloth left edge at X=-0.075 instead of X=-0.175
+    # Create environment with strict grasp-assist enabled
+    # Pins cloth vertices to gripper when gripper closes near cloth
+    # Strict mode uses tight tolerances: 2cm vertical, 3cm horizontal
+    # cloth_x_offset=-0.05 moves cloth closer to robots for better kinematic reach
     env = create_bimanual_env(
         robots="Piper",
         task="TwoArmClothFold",
@@ -639,12 +728,20 @@ def main():
         has_offscreen_renderer=True,
         use_camera_obs=False,
         cloth_preset=args.cloth_preset,
-        grasp_assist=True,  # Enable grasp_assist for reliable cloth attachment
+        grasp_assist=True,  # Enable grasp-assist for reliable cloth pickup
+        assist_strict=True,  # Use strict detection with tight tolerances
+        assist_z_tolerance=0.02,  # 2cm vertical tolerance
+        assist_xy_radius=0.03,  # 3cm horizontal radius
         ignore_done=True,
-        cloth_x_offset=0.05,  # Move cloth further from robots for reachability
+        cloth_x_offset=-0.05,  # Move cloth closer to robots for better Z reach
     )
     print("Environment created!")
     print(f"Action dimension: {env.action_dim}")
+
+    # List available cameras for debugging
+    if args.record or args.debug:
+        cam_names = [env.sim.model.camera_id2name(i) for i in range(env.sim.model.ncam)]
+        print(f"Available cameras: {cam_names}")
 
     # Create policy with correct action dimension
     config = PiperClothFoldConfig()
@@ -655,6 +752,20 @@ def main():
         print(f"\n{'='*70}")
         print(f" Episode {episode + 1}/{args.episodes}")
         print(f"{'='*70}")
+
+        # Setup video recording for this episode
+        video_writer = None
+        if args.record:
+            if args.record_path:
+                video_path = args.record_path
+            else:
+                # Auto-generate filename with timestamp
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                video_dir = Path("recordings")
+                video_dir.mkdir(exist_ok=True)
+                video_path = str(video_dir / f"piper_cloth_fold_{timestamp}_ep{episode+1}.mp4")
+            print(f"Recording to: {video_path}")
+            video_writer = create_video_writer(video_path, fps=args.record_fps, frame_size=(512, 512))
 
         obs = env.reset()
         policy.reset()
@@ -671,6 +782,7 @@ def main():
 
         total_steps = 0
         success = False
+        frames_recorded = 0
 
         for step in range(args.max_steps):
             action = policy.predict(obs)
@@ -711,26 +823,41 @@ def main():
             if args.render:
                 env.render()
 
-            # Debug logging for gripper and grasp assist state
+            # Capture frame for video recording
+            if args.record and video_writer is not None:
+                # Use MuJoCo's offscreen rendering with bimanual_view camera
+                frame = env.sim.render(
+                    width=512,
+                    height=512,
+                    camera_name="bimanual_view",
+                    mode="offscreen",
+                )
+                # Frame comes as (H, W, 3) RGB, flip vertically (MuJoCo convention)
+                if frame is not None and frame.size > 0:
+                    frame = np.flipud(frame).copy()  # .copy() ensures contiguous array
+                    add_frame_to_video(video_writer, frame)
+                    frames_recorded += 1
+
+            # Debug logging for gripper and cloth state
             if args.debug and step % 10 == 0:
                 # Gripper state
                 g0_qpos = obs.get("robot0_gripper_qpos", [])
                 g1_qpos = obs.get("robot1_gripper_qpos", [])
                 print(f"  Gripper qpos: r0={g0_qpos}, r1={g1_qpos}")
 
-                # Gripper signals and smooth position
-                print(f"  Gripper signals: {env.gripper_signals}, smooth_pos={policy.gripper_position:.4f}")
+                # Gripper position (physics-based control)
+                print(f"  Gripper target: {policy.gripper_position:.4f}")
 
-                # Grasp assist state
-                pinned = len(env._assist_vertices)
-                print(f"  Pinned grippers: {pinned}, vertices: {list(env._assist_vertices.keys())}")
-
-                # EEF Z positions vs cloth Z
+                # EEF Z positions vs cloth Z (for contact verification)
                 eef0_z = obs["robot0_eef_pos"][2]
                 eef1_z = obs["robot1_eef_pos"][2]
                 cloth_z = 0.81
                 print(f"  EEF Z: r0={eef0_z:.3f}, r1={eef1_z:.3f}, cloth={cloth_z:.3f}")
-                print(f"  Z distance: r0={abs(eef0_z-cloth_z):.3f}, r1={abs(eef1_z-cloth_z):.3f}")
+                print(f"  Z distance from cloth: r0={abs(eef0_z-cloth_z):.3f}, r1={abs(eef1_z-cloth_z):.3f}")
+
+                # Cloth center position (to verify if cloth is moving with gripper)
+                cloth_center = obs["cloth_center"]
+                print(f"  Cloth center: Z={cloth_center[2]:.3f}")
 
             total_steps += 1
 
@@ -759,6 +886,17 @@ def main():
                 action = np.zeros(env.action_dim)
                 obs, _, _, _ = env.step(action)
                 env.render()
+                # Continue recording during hold
+                if args.record and video_writer is not None:
+                    frame = env.sim.render(width=512, height=512, camera_name="bimanual_view", mode="offscreen")
+                    if frame is not None and frame.size > 0:
+                        frame = np.flipud(frame).copy()
+                        add_frame_to_video(video_writer, frame)
+
+        # Close video writer for this episode
+        if video_writer is not None:
+            video_writer.release()
+            print(f"Video saved to: {video_path} ({frames_recorded} frames)")
 
     print("\nDone!")
     env.close()
