@@ -34,6 +34,7 @@ def run_scripted_collection(
     cloth_preset: str = "medium",
     cloth_noise: bool = False,
     robot_noise: bool = False,
+    use_cv2: bool = False,
 ):
     if policy_name is None:
         policy_name = "cloth_fold" if two_arm_cloth or "Cloth" in task else "lift"
@@ -56,6 +57,15 @@ def run_scripted_collection(
         policy = ScriptedBimanualPolicy(ScriptedPolicyConfig())
         needs_object_obs = False
 
+    if use_cv2 and render:
+        import cv2
+    else:
+        cv2 = None
+
+    # When using cv2, use offscreen renderer instead of native viewer
+    use_native_renderer = render and not use_cv2
+    use_offscreen = use_camera_obs or render
+
     if debug:
         print(f"[Debug Mode] Task: {task}, Robot: {robot}, Policy: {policy_name}")
         if two_arm_cloth:
@@ -75,8 +85,8 @@ def run_scripted_collection(
         env = TwoArmClothFold(
             robots=robots_list,
             env_configuration=env_configuration,
-            has_renderer=render,
-            has_offscreen_renderer=use_camera_obs or render,
+            has_renderer=use_native_renderer,
+            has_offscreen_renderer=use_offscreen,
             use_camera_obs=use_camera_obs,
             use_object_obs=needs_object_obs,
             camera_names=camera_list,
@@ -90,8 +100,8 @@ def run_scripted_collection(
         env = create_bimanual_env(
             robots=robot,
             task=task,
-            has_renderer=render,
-            has_offscreen_renderer=use_camera_obs or render,
+            has_renderer=use_native_renderer,
+            has_offscreen_renderer=use_offscreen,
             use_camera_obs=use_camera_obs,
             input_ref_frame=input_ref_frame,
             camera_names=camera_list,
@@ -127,7 +137,16 @@ def run_scripted_collection(
                 collector.record_step(obs, action, reward, done)
 
             if render:
-                env.render()
+                if cv2 is not None:
+                    cv2_camera = "bimanual_view" if two_arm_cloth else "agentview"
+                    frame = env.sim.render(width=640, height=480, camera_name=cv2_camera)
+                    frame = frame[::-1]  # Flip vertically (MuJoCo convention)
+                    frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+                    cv2.imshow(f"{task} Scripted Collection", frame)
+                    if cv2.waitKey(1) & 0xFF == ord("q"):
+                        break
+                else:
+                    env.render()
 
             steps += 1
 
@@ -144,6 +163,8 @@ def run_scripted_collection(
                 f"Episode {episode + 1}/{num_episodes} complete (steps: {steps}, success: {info.get('success', False)})"
             )
 
+    if cv2 is not None:
+        cv2.destroyAllWindows()
     env.close()
 
 
@@ -204,6 +225,11 @@ def main():
         action="store_true",
         help="Enable robot joint initialization noise",
     )
+    parser.add_argument(
+        "--cv2",
+        action="store_true",
+        help="Use OpenCV for rendering (workaround for macOS mjpython issue)",
+    )
 
     args = parser.parse_args()
 
@@ -225,6 +251,7 @@ def main():
         cloth_preset=args.cloth_preset,
         cloth_noise=args.cloth_noise,
         robot_noise=args.robot_noise,
+        use_cv2=args.cv2,
     )
 
 
