@@ -186,6 +186,8 @@ class ScriptedClothFoldPolicy:
         self._phase_step_counter = {}
         self._initial_grasp_pos0 = None
         self._initial_grasp_pos1 = None
+        self._fold_target0 = None
+        self._fold_target1 = None
         self._done = False
 
     def _pick_front_corners(self, corners: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
@@ -239,6 +241,7 @@ class ScriptedClothFoldPolicy:
         min_steps: int,
         max_steps: int,
         phase_name: str,
+        allow_early_exit: bool = True,
     ) -> bool:
         dist0 = np.linalg.norm(target0 - eef0)
         dist1 = np.linalg.norm(target1 - eef1)
@@ -248,7 +251,7 @@ class ScriptedClothFoldPolicy:
         )
 
         max_reached = self.phase_step >= max_steps
-        early_exit = converged and self.phase_step >= min_steps
+        early_exit = allow_early_exit and converged and self.phase_step >= min_steps
 
         if self.debug and early_exit and not max_reached:
             print(
@@ -256,6 +259,47 @@ class ScriptedClothFoldPolicy:
             )
 
         return max_reached or early_exit
+
+    def _compute_fold_targets(
+        self,
+        grasp_pos0: np.ndarray,
+        grasp_pos1: np.ndarray,
+        corners: np.ndarray,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Compute fold target positions relative to cloth geometry.
+
+        For parallel layout: Fold along X-axis toward cloth center
+        For front-back layout: Fold along Y-axis toward cloth back
+        """
+        cloth_center = corners.mean(axis=0)
+
+        # Use the actual grasped corner height + small offset (just above table)
+        fold_z = grasp_pos0[2] + 0.02
+
+        if self.config.layout == "parallel":
+            # Parallel layout: Move from left side toward cloth center X
+            xs = corners[:, 0]
+            right_x = np.max(xs)
+            left_x = np.min(xs)
+
+            # Fold target: center of cloth along X
+            fold_x = (left_x + right_x) / 2.0
+
+            target0 = np.array([fold_x, grasp_pos0[1], fold_z])
+            target1 = np.array([fold_x, grasp_pos1[1], fold_z])
+        else:  # front-back layout
+            # Front-back layout: Move from front toward back
+            ys = corners[:, 1]
+            front_y = np.max(ys)
+            back_y = np.min(ys)
+
+            # Fold target: toward back, ~30% from back edge
+            fold_y = back_y + (front_y - back_y) * 0.3
+
+            target0 = np.array([grasp_pos0[0], fold_y, fold_z])
+            target1 = np.array([grasp_pos1[0], fold_y, fold_z])
+
+        return target0, target1
 
     def predict(self, obs: Dict) -> np.ndarray:
         eef0 = obs.get("robot0_eef_pos")
@@ -392,24 +436,17 @@ class ScriptedClothFoldPolicy:
                 self.config.lift_steps,
                 "lift",
             ):
+                # Compute fold targets before transitioning to fold phase
+                self._fold_target0, self._fold_target1 = self._compute_fold_targets(
+                    grasp_pos0, grasp_pos1, corners
+                )
                 self.phase = "fold"
                 self.phase_step = 0
 
         elif self.phase == "fold":
-            # Fold cloth by moving grippers to fixed target positions on the opposite side
-            # Use fixed height at table surface (0.81m) to ensure proper fold
-            table_z = 0.81
-            if self.config.layout == "parallel":
-                # Parallel layout: Move from left side (X=-0.45) toward center (X=0)
-                # Target X is at center of cloth, keeping Y positions
-                fold_x = 0.0  # Fold to center
-                target0 = np.array([fold_x, grasp_pos0[1], table_z + 0.02])
-                target1 = np.array([fold_x, grasp_pos1[1], table_z + 0.02])
-            else:  # front-back layout
-                # Front-back layout: Move from front (Y=+0.3) toward back (Y=-0.3)
-                fold_y = -0.1  # Fold toward back
-                target0 = np.array([grasp_pos0[0], fold_y, table_z + 0.02])
-                target1 = np.array([grasp_pos1[0], fold_y, table_z + 0.02])
+            # Fold cloth by moving grippers to computed target positions
+            target0 = self._fold_target0.copy()
+            target1 = self._fold_target1.copy()
             gripper = self.config.close_gripper
 
             if self._check_phase_complete(
@@ -420,21 +457,15 @@ class ScriptedClothFoldPolicy:
                 self.config.min_fold_steps,
                 self.config.fold_steps,
                 "fold",
+                allow_early_exit=False,
             ):
                 self.phase = "release"
                 self.phase_step = 0
 
         elif self.phase == "release":
             # Keep same position as fold phase but open grippers
-            table_z = 0.81
-            if self.config.layout == "parallel":
-                fold_x = 0.0
-                target0 = np.array([fold_x, grasp_pos0[1], table_z + 0.02])
-                target1 = np.array([fold_x, grasp_pos1[1], table_z + 0.02])
-            else:  # front-back layout
-                fold_y = -0.1
-                target0 = np.array([grasp_pos0[0], fold_y, table_z + 0.02])
-                target1 = np.array([grasp_pos1[0], fold_y, table_z + 0.02])
+            target0 = self._fold_target0.copy()
+            target1 = self._fold_target1.copy()
             gripper = self.config.open_gripper
 
             if self._check_phase_complete(
@@ -445,29 +476,17 @@ class ScriptedClothFoldPolicy:
                 self.config.min_release_steps,
                 self.config.release_steps,
                 "release",
+                allow_early_exit=False,
             ):
                 self.phase = "retreat"
                 self.phase_step = 0
 
         elif self.phase == "retreat":
             # Move grippers up and away from cloth
-            table_z = 0.81
-            if self.config.layout == "parallel":
-                fold_x = 0.0
-                target0 = np.array(
-                    [fold_x, grasp_pos0[1], table_z + self.config.retreat_height]
-                )
-                target1 = np.array(
-                    [fold_x, grasp_pos1[1], table_z + self.config.retreat_height]
-                )
-            else:  # front-back layout
-                fold_y = -0.1
-                target0 = np.array(
-                    [grasp_pos0[0], fold_y, table_z + self.config.retreat_height]
-                )
-                target1 = np.array(
-                    [grasp_pos1[0], fold_y, table_z + self.config.retreat_height]
-                )
+            target0 = self._fold_target0.copy()
+            target0[2] += self.config.retreat_height
+            target1 = self._fold_target1.copy()
+            target1[2] += self.config.retreat_height
             gripper = self.config.open_gripper
 
             if self._check_phase_complete(
@@ -484,24 +503,18 @@ class ScriptedClothFoldPolicy:
                 self._done = True
 
         else:  # done or unknown phase
-            # Hold position after completion
-            table_z = 0.81
-            if self.config.layout == "parallel":
-                fold_x = 0.0
-                target0 = np.array(
-                    [fold_x, grasp_pos0[1], table_z + self.config.retreat_height]
-                )
-                target1 = np.array(
-                    [fold_x, grasp_pos1[1], table_z + self.config.retreat_height]
-                )
-            else:  # front-back layout
-                fold_y = -0.1
-                target0 = np.array(
-                    [grasp_pos0[0], fold_y, table_z + self.config.retreat_height]
-                )
-                target1 = np.array(
-                    [grasp_pos1[0], fold_y, table_z + self.config.retreat_height]
-                )
+            # Hold position after completion (use fold targets if available)
+            if self._fold_target0 is not None and self._fold_target1 is not None:
+                target0 = self._fold_target0.copy()
+                target0[2] += self.config.retreat_height
+                target1 = self._fold_target1.copy()
+                target1[2] += self.config.retreat_height
+            else:
+                # Fallback for edge cases where fold targets weren't computed
+                target0 = grasp_pos0.copy()
+                target0[2] += self.config.retreat_height
+                target1 = grasp_pos1.copy()
+                target1[2] += self.config.retreat_height
             gripper = self.config.open_gripper
 
         action0 = self._compute_arm_action(np.asarray(eef0), target0, gripper)

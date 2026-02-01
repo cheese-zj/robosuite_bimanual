@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional, Union
+from typing import Optional, Tuple, Union
 import tempfile
 
+import mujoco
 import numpy as np
 
 import robosuite.utils.transform_utils as T
@@ -64,12 +65,19 @@ class TwoArmClothFold(TwoArmEnv):
         cloth_offset: float = 0.01,
         cloth_x_offset: float = -0.15,  # Shift cloth toward robots for reachability
         grasp_assist: bool = True,
-        assist_radius: float = 0.15,
-        assist_max_verts: int = 8,  # Increased from 5 for more stable grip
+        assist_radius: float = 0.18,  # Increased from 0.15 for better vertex capture with randomization
+        assist_max_verts: int = 12,  # Increased from 8 for more stable grip with randomization
         assist_action_threshold: float = 0.3,
+        assist_strength: float = 0.5,  # Blend factor for soft vertex attachment
+        assist_velocity_damping: float = 0.0,  # Damping on attached vertex velocities
+        render_two_sided: bool = True,  # Disable backface culling for cloth visuals
         # Noise/randomization parameters
         cloth_noise: bool = False,  # Randomize cloth position on reset
         cloth_noise_std: float = 0.03,  # Standard deviation for cloth position noise (meters)
+        cloth_rotation_noise: bool = False,  # Randomize cloth rotation (yaw) on reset
+        cloth_rotation_noise_max: float = 0.2618,  # Max rotation in radians (~15 degrees)
+        cloth_reach_margin: float = 0.05,
+        cloth_randomize_max_tries: int = 10,
         robot_noise: bool = False,  # Use robot initialization noise (joint position randomization)
     ):
         # Cloth and grasp assist parameters
@@ -83,10 +91,19 @@ class TwoArmClothFold(TwoArmEnv):
         self.assist_radius = assist_radius
         self.assist_max_verts = assist_max_verts
         self.assist_action_threshold = assist_action_threshold
+        self.assist_strength = float(np.clip(assist_strength, 0.0, 1.0))
+        self.assist_velocity_damping = float(
+            np.clip(assist_velocity_damping, 0.0, 1.0)
+        )
+        self.render_two_sided = render_two_sided
 
         # Noise/randomization parameters
         self.cloth_noise = cloth_noise
         self.cloth_noise_std = cloth_noise_std
+        self.cloth_rotation_noise = cloth_rotation_noise
+        self.cloth_rotation_noise_max = cloth_rotation_noise_max
+        self.cloth_reach_margin = max(0.0, cloth_reach_margin)
+        self.cloth_randomize_max_tries = max(1, int(cloth_randomize_max_tries))
         self.robot_noise = robot_noise
 
         # Reward configuration
@@ -110,9 +127,13 @@ class TwoArmClothFold(TwoArmEnv):
         # Cloth simulation state
         self._cloth_flex_id = None
         self._cloth_vert_slice = None
+        self._cloth_body_ids = None
+        self._cloth_body_pos_base = None
         self._gripper_site_ids = []
         self._assist_vertices = {}
         self._assist_offsets = {}
+        self._reach_gripper_positions = None
+        self._reach_dist_thresholds = None
 
         # Handle robot initialization noise flag
         # If robot_noise is False, disable initialization noise; otherwise use default
@@ -147,6 +168,7 @@ class TwoArmClothFold(TwoArmEnv):
             renderer_config=renderer_config,
             seed=seed,
         )
+        self._apply_render_flags()
 
     def _load_model(self):
         """Load model and set up robot base poses."""
@@ -247,6 +269,15 @@ class TwoArmClothFold(TwoArmEnv):
                 start = int(self.sim.model.flex_vertadr[self._cloth_flex_id])
                 count = int(self.sim.model.flex_vertnum[self._cloth_flex_id])
                 self._cloth_vert_slice = slice(start, start + count)
+                if hasattr(self.sim.model, "flex_vertbodyid"):
+                    vert_body_ids = np.asarray(
+                        self.sim.model.flex_vertbodyid, dtype=int
+                    )
+                    if vert_body_ids.size > 0:
+                        self._cloth_body_ids = vert_body_ids
+                        self._cloth_body_pos_base = np.array(
+                            self.sim.model.body_pos[vert_body_ids], copy=True
+                        )
 
         # Find gripper site IDs for grasp assist
         self._gripper_site_ids = []
@@ -298,7 +329,12 @@ class TwoArmClothFold(TwoArmEnv):
         return chosen + offset
 
     def _update_grasp_assist(self, action):
-        """Update grasp assist: pin nearby cloth vertices to closing grippers."""
+        """Update grasp assist: pin nearby cloth vertices to closing grippers.
+
+        Uses hysteresis for stable grip: vertices attach when grip > attach_threshold,
+        but only release when grip < release_threshold (a separate, lower value).
+        This prevents accidental release during manipulation.
+        """
         if not self.grasp_assist:
             return
         if getattr(self.sim.model, "nflex", 0) <= 0 or not hasattr(
@@ -320,12 +356,15 @@ class TwoArmClothFold(TwoArmEnv):
         if gripper_positions is None:
             return
 
+        # Hysteresis thresholds for stable grip
+        attach_threshold = self.assist_action_threshold  # Default 0.3
+        release_threshold = -0.3  # Must open gripper significantly to release
+
         # Check each gripper for closing/opening
         for idx, gripper_pos in enumerate(gripper_positions):
             grip_cmd = action[idx * per_arm_dim + (per_arm_dim - 1)]
-            closing = grip_cmd > self.assist_action_threshold
 
-            if closing and idx not in self._assist_vertices:
+            if grip_cmd > attach_threshold and idx not in self._assist_vertices:
                 # Gripper is closing - find nearby vertices to attach
                 vertices = self._find_nearest_vertices(gripper_pos)
                 if vertices.size == 0:
@@ -333,8 +372,8 @@ class TwoArmClothFold(TwoArmEnv):
                 self._assist_vertices[idx] = vertices
                 offsets = self.sim.data.flexvert_xpos[vertices] - gripper_pos[None, :]
                 self._assist_offsets[idx] = offsets
-            elif not closing and idx in self._assist_vertices:
-                # Gripper is opening - release vertices
+            elif grip_cmd < release_threshold and idx in self._assist_vertices:
+                # Gripper is opening significantly - release vertices
                 self._assist_vertices.pop(idx, None)
                 self._assist_offsets.pop(idx, None)
 
@@ -344,9 +383,60 @@ class TwoArmClothFold(TwoArmEnv):
             if offsets is None:
                 continue
             gripper_pos = gripper_positions[idx]
-            self.sim.data.flexvert_xpos[vertices] = gripper_pos[None, :] + offsets
-            if hasattr(self.sim.data, "flexvert_xvel"):
-                self.sim.data.flexvert_xvel[vertices] = 0.0
+            self._apply_grasp_blend(vertices, gripper_pos, offsets)
+
+    def _apply_grasp_positions(self):
+        """Apply stored grasp assist positions to attached vertices.
+
+        Called after sim.step() to counteract physics-induced vertex movement.
+        This ensures cloth stays attached to grippers even when physics forces
+        (elasticity, tension) try to pull vertices away during fold motion.
+        """
+        if not self.grasp_assist:
+            return
+        if not hasattr(self.sim.data, "flexvert_xpos"):
+            return
+
+        gripper_positions = self._get_gripper_positions()
+        if gripper_positions is None:
+            return
+
+        for idx, vertices in self._assist_vertices.items():
+            offsets = self._assist_offsets.get(idx)
+            if offsets is None or idx >= len(gripper_positions):
+                continue
+            gripper_pos = gripper_positions[idx]
+            self._apply_grasp_blend(vertices, gripper_pos, offsets)
+
+    def _apply_grasp_blend(
+        self, vertices: np.ndarray, gripper_pos: np.ndarray, offsets: np.ndarray
+    ):
+        """Softly pull attached vertices toward the gripper to avoid frozen cloth."""
+        if self.assist_strength <= 0.0:
+            return
+        target = gripper_pos[None, :] + offsets
+        current = self.sim.data.flexvert_xpos[vertices]
+        if self.assist_strength >= 1.0:
+            blended = target
+        else:
+            blended = current + self.assist_strength * (target - current)
+        self.sim.data.flexvert_xpos[vertices] = blended
+        if hasattr(self.sim.data, "flexvert_xvel") and self.assist_velocity_damping > 0.0:
+            self.sim.data.flexvert_xvel[vertices] *= 1.0 - self.assist_velocity_damping
+
+    def _apply_render_flags(self):
+        """Disable backface culling so cloth renders from both sides."""
+        if not self.render_two_sided:
+            return
+        if getattr(self, "sim", None) is not None:
+            render_context = getattr(self.sim, "_render_context_offscreen", None)
+            if render_context is not None:
+                render_context.scn.flags[mujoco.mjtRndFlag.mjRND_CULL_FACE] = 0
+
+        viewer_wrapper = getattr(self, "viewer", None)
+        viewer = getattr(viewer_wrapper, "viewer", None) if viewer_wrapper else None
+        if viewer is not None and hasattr(viewer, "scn"):
+            viewer.scn.flags[mujoco.mjtRndFlag.mjRND_CULL_FACE] = 0
 
     @staticmethod
     def _extract_corners(vertices: np.ndarray) -> np.ndarray:
@@ -371,6 +461,59 @@ class TwoArmClothFold(TwoArmEnv):
         return np.stack(
             [vertices[idx_bl], vertices[idx_tl], vertices[idx_br], vertices[idx_tr]],
             axis=0,
+        )
+
+    def _pick_grasp_corners(
+        self, corners: np.ndarray
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Pick the two corners to grasp based on layout configuration."""
+        if corners.shape != (4, 3):
+            raise ValueError("cloth_corners must be shape (4, 3)")
+
+        if self.env_configuration in {"opposed", "front-back"}:
+            ys = corners[:, 1]
+            front_indices = np.argsort(ys)[-2:]
+            front = corners[front_indices]
+            corner0 = front[np.argmin(front[:, 0])]
+            corner1 = front[np.argmax(front[:, 0])]
+            return corner0, corner1
+
+        xs = corners[:, 0]
+        left_indices = np.argsort(xs)[:2]
+        left = corners[left_indices]
+        corner0 = left[np.argmin(left[:, 1])]
+        corner1 = left[np.argmax(left[:, 1])]
+        return corner0, corner1
+
+    def _cache_reachability(self):
+        """Cache reachability thresholds for cloth grasping."""
+        gripper_positions = self._get_gripper_positions()
+        verts = self._cloth_body_pos_base
+        if verts is None:
+            verts = self._get_cloth_vertices()
+        if gripper_positions is None or verts is None or verts.size == 0:
+            self._reach_gripper_positions = None
+            self._reach_dist_thresholds = None
+            return
+
+        corners = self._extract_corners(verts)
+        try:
+            corner0, corner1 = self._pick_grasp_corners(corners)
+        except ValueError:
+            self._reach_gripper_positions = None
+            self._reach_dist_thresholds = None
+            return
+
+        dist0 = np.linalg.norm(corner0 - gripper_positions[0])
+        if gripper_positions.shape[0] > 1:
+            dist1 = np.linalg.norm(corner1 - gripper_positions[1])
+        else:
+            dist1 = dist0
+
+        self._reach_gripper_positions = gripper_positions
+        self._reach_dist_thresholds = (
+            dist0 + self.cloth_reach_margin,
+            dist1 + self.cloth_reach_margin,
         )
 
     def _setup_observables(self):
@@ -425,27 +568,176 @@ class TwoArmClothFold(TwoArmEnv):
         super()._pre_action(action, policy_step)
         self._update_grasp_assist(action)
 
+    def step(self, action):
+        """Override step to apply grasp assist after each physics step.
+
+        This ensures cloth vertices stay attached to grippers even when
+        physics forces (elasticity, tension) try to pull them away during
+        fold motion. The base class only calls _pre_action before sim.step(),
+        but physics can move vertices afterward. We fix this by also applying
+        grasp positions after each sim.step().
+        """
+        if self.done:
+            raise ValueError("executing action in terminated episode")
+
+        self.timestep += 1
+        policy_step = True
+
+        # Core simulation loop - same as base class but with post-step grasp assist
+        for i in range(int(self.control_timestep / self.model_timestep)):
+            if self.lite_physics:
+                self.sim.step1()
+            else:
+                self.sim.forward()
+            self._pre_action(action, policy_step)
+            if self.lite_physics:
+                self.sim.step2()
+            else:
+                self.sim.step()
+
+            # KEY FIX: Apply grasp positions AFTER physics step to counteract
+            # physics-induced vertex movement during fold motion
+            self._apply_grasp_positions()
+
+            self._update_observables()
+            policy_step = False
+
+        self.cur_time += self.control_timestep
+
+        reward, done, info = self._post_action(action)
+
+        if self.viewer is not None and self.renderer != "mujoco":
+            self.viewer.update()
+            self._apply_render_flags()
+
+        if self.viewer is not None and self.renderer == "mujoco":
+            if self.viewer.is_running() is False:
+                done = True
+
+        observations = (
+            self.viewer._get_observations()
+            if self.viewer_get_obs
+            else self._get_observations()
+        )
+        return observations, reward, done, info
+
     def _reset_internal(self):
         """Reset internal state variables."""
         super()._reset_internal()
         self._assist_vertices = {}
         self._assist_offsets = {}
+        self._reach_gripper_positions = None
+        self._reach_dist_thresholds = None
 
-        # Apply cloth position noise if enabled
-        if self.cloth_noise and hasattr(self.sim.data, "flexvert_xpos"):
-            if self._cloth_vert_slice is not None:
-                # Generate random XY offset (same for all vertices to move cloth as a whole)
-                xy_noise = np.random.normal(0, self.cloth_noise_std, size=2)
-                # Apply to all cloth vertices
-                self.sim.data.flexvert_xpos[self._cloth_vert_slice, 0] += xy_noise[0]
-                self.sim.data.flexvert_xpos[self._cloth_vert_slice, 1] += xy_noise[1]
-                # Zero velocities after position change
-                if hasattr(self.sim.data, "flexvert_xvel"):
-                    self.sim.data.flexvert_xvel[self._cloth_vert_slice] = 0.0
+    def reset(self):
+        """Reset the environment and apply cloth randomization.
 
-    def _post_reset(self):
-        """Called after reset to set up free camera."""
-        super()._post_reset()
+        Cloth randomization must happen after the base reset completes because
+        reset() calls sim.forward() which recomputes flex vertex positions from
+        model.body_pos. We need to modify body_pos after this forward() call.
+        """
+        # Call base reset which handles sim reset, _reset_internal, and sim.forward()
+        obs = super().reset()
+        self._apply_render_flags()
+
+        # Apply cloth randomization after base reset completes
+        if (
+            self.cloth_noise or self.cloth_rotation_noise
+        ) and self._cloth_vert_slice is not None:
+            self._cache_reachability()
+            self._apply_cloth_randomization()
+            # Force update observables to get fresh values after cloth position change
+            obs = self._get_observations(force_update=True)
+
+        return obs
+
+    def _apply_cloth_randomization(self):
+        """Apply position and rotation noise to cloth by modifying vertex body positions.
+
+        MuJoCo flex components have each vertex as a separate body. To properly
+        randomize cloth position, we must modify model.body_pos for all vertex
+        bodies and call sim.forward() to update the simulation state.
+        """
+        if not hasattr(self.sim.model, "flex_vertbodyid"):
+            return
+
+        # Get vertex body IDs
+        vert_body_ids = self._cloth_body_ids
+        if vert_body_ids is None or vert_body_ids.size == 0:
+            return
+
+        if self._cloth_body_pos_base is None:
+            base_positions = np.array(self.sim.model.body_pos[vert_body_ids], copy=True)
+        else:
+            base_positions = np.array(self._cloth_body_pos_base, copy=True)
+        cloth_center = base_positions.mean(axis=0)
+        centered_xy = base_positions[:, :2] - cloth_center[:2]
+
+        best_positions = None
+        best_score = np.inf
+
+        for _ in range(self.cloth_randomize_max_tries):
+            xy_offset = np.zeros(2)
+            if self.cloth_noise:
+                xy_offset = np.random.normal(0, self.cloth_noise_std, size=2)
+
+            yaw = 0.0
+            if self.cloth_rotation_noise:
+                yaw = np.random.uniform(
+                    -self.cloth_rotation_noise_max, self.cloth_rotation_noise_max
+                )
+
+            if yaw != 0.0:
+                cos_yaw, sin_yaw = np.cos(yaw), np.sin(yaw)
+                rot = np.array([[cos_yaw, -sin_yaw], [sin_yaw, cos_yaw]])
+                rotated_xy = centered_xy @ rot.T
+            else:
+                rotated_xy = centered_xy
+
+            candidate_positions = base_positions.copy()
+            candidate_positions[:, :2] = rotated_xy + cloth_center[:2] + xy_offset
+
+            if (
+                self._reach_gripper_positions is None
+                or self._reach_dist_thresholds is None
+            ):
+                best_positions = candidate_positions
+                break
+
+            corners = self._extract_corners(candidate_positions)
+            try:
+                corner0, corner1 = self._pick_grasp_corners(corners)
+            except ValueError:
+                continue
+
+            dist0 = np.linalg.norm(corner0 - self._reach_gripper_positions[0])
+            if self._reach_gripper_positions.shape[0] > 1:
+                dist1 = np.linalg.norm(corner1 - self._reach_gripper_positions[1])
+            else:
+                dist1 = dist0
+
+            score = max(dist0, dist1)
+            if score < best_score:
+                best_score = score
+                best_positions = candidate_positions
+
+            if (
+                dist0 <= self._reach_dist_thresholds[0]
+                and dist1 <= self._reach_dist_thresholds[1]
+            ):
+                best_positions = candidate_positions
+                break
+
+        if best_positions is None:
+            best_positions = base_positions
+
+        self.sim.model.body_pos[vert_body_ids] = best_positions
+        self.sim.forward()
+        if (
+            hasattr(self.sim.data, "flexvert_xvel")
+            and self._cloth_vert_slice is not None
+        ):
+            self.sim.data.flexvert_xvel[self._cloth_vert_slice] = 0.0
 
     def _setup_free_camera(self):
         """Enable free camera mode for interactive navigation with mouse."""

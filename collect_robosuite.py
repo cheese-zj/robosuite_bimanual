@@ -317,6 +317,13 @@ class BimanualDataCollector:
     """
     Collects demonstration data from a bimanual robosuite environment.
     Saves in ACT-compatible HDF5 format.
+
+    Args:
+        env: Robosuite environment
+        save_dir: Directory to save HDF5 files
+        camera_names: Camera names for image observations
+        single_arm: If set to 0 or 1, record only that arm's data (7-dim actions).
+                   If None (default), record both arms (14-dim actions).
     """
 
     def __init__(
@@ -324,6 +331,7 @@ class BimanualDataCollector:
         env,
         save_dir: str = "data/bimanual",
         camera_names: CameraNames = None,
+        single_arm: Optional[int] = None,
     ):
         self.env = env
         self.save_dir = Path(save_dir)
@@ -331,6 +339,7 @@ class BimanualDataCollector:
         if camera_names is None:
             camera_names = getattr(env, "camera_names", None)
         self.camera_names = _parse_camera_names(camera_names) or ["agentview"]
+        self.single_arm = single_arm
 
         # Episode tracking
         self.episode_count = self._count_existing()
@@ -339,6 +348,8 @@ class BimanualDataCollector:
 
         print(f"Save directory: {self.save_dir}")
         print(f"Existing episodes: {self.episode_count}")
+        if single_arm is not None:
+            print(f"Single-arm mode: Recording arm {single_arm} only")
 
     def _count_existing(self) -> int:
         return len(list(self.save_dir.glob("episode_*.hdf5")))
@@ -361,19 +372,35 @@ class BimanualDataCollector:
         if self.current_episode is None:
             return
 
-        # Store observation
-        obs_data = {
-            "robot0_joint_pos": obs.get("robot0_joint_pos", np.zeros(7)),
-            "robot0_joint_vel": obs.get("robot0_joint_vel", np.zeros(7)),
-            "robot0_eef_pos": obs.get("robot0_eef_pos", np.zeros(3)),
-            "robot0_eef_quat": obs.get("robot0_eef_quat", np.zeros(4)),
-            "robot0_gripper_qpos": obs.get("robot0_gripper_qpos", np.zeros(2)),
-            "robot1_joint_pos": obs.get("robot1_joint_pos", np.zeros(7)),
-            "robot1_joint_vel": obs.get("robot1_joint_vel", np.zeros(7)),
-            "robot1_eef_pos": obs.get("robot1_eef_pos", np.zeros(3)),
-            "robot1_eef_quat": obs.get("robot1_eef_quat", np.zeros(4)),
-            "robot1_gripper_qpos": obs.get("robot1_gripper_qpos", np.zeros(2)),
-        }
+        action = np.asarray(action).flatten()
+
+        if self.single_arm is not None:
+            # Single-arm format: no robot prefix, 7-dim actions
+            arm_idx = self.single_arm
+            obs_data = {
+                "joint_pos": obs.get(f"robot{arm_idx}_joint_pos", np.zeros(7)),
+                "joint_vel": obs.get(f"robot{arm_idx}_joint_vel", np.zeros(7)),
+                "eef_pos": obs.get(f"robot{arm_idx}_eef_pos", np.zeros(3)),
+                "eef_quat": obs.get(f"robot{arm_idx}_eef_quat", np.zeros(4)),
+                "gripper_qpos": obs.get(f"robot{arm_idx}_gripper_qpos", np.zeros(2)),
+            }
+            # Extract single arm action (7-dim from 14-dim)
+            recorded_action = action[arm_idx * 7 : (arm_idx + 1) * 7]
+        else:
+            # Original bimanual format: robot0_*, robot1_* prefixes, 14-dim actions
+            obs_data = {
+                "robot0_joint_pos": obs.get("robot0_joint_pos", np.zeros(7)),
+                "robot0_joint_vel": obs.get("robot0_joint_vel", np.zeros(7)),
+                "robot0_eef_pos": obs.get("robot0_eef_pos", np.zeros(3)),
+                "robot0_eef_quat": obs.get("robot0_eef_quat", np.zeros(4)),
+                "robot0_gripper_qpos": obs.get("robot0_gripper_qpos", np.zeros(2)),
+                "robot1_joint_pos": obs.get("robot1_joint_pos", np.zeros(7)),
+                "robot1_joint_vel": obs.get("robot1_joint_vel", np.zeros(7)),
+                "robot1_eef_pos": obs.get("robot1_eef_pos", np.zeros(3)),
+                "robot1_eef_quat": obs.get("robot1_eef_quat", np.zeros(4)),
+                "robot1_gripper_qpos": obs.get("robot1_gripper_qpos", np.zeros(2)),
+            }
+            recorded_action = action
 
         # Add camera images
         for cam in self.camera_names:
@@ -387,7 +414,7 @@ class BimanualDataCollector:
             obs_data["cloth_center"] = obs["cloth_center"]
 
         self.current_episode["observations"].append(obs_data)
-        self.current_episode["actions"].append(action)
+        self.current_episode["actions"].append(recorded_action)
         self.current_episode["rewards"].append(reward)
         self.current_episode["dones"].append(done)
 
@@ -411,6 +438,13 @@ class BimanualDataCollector:
             meta.attrs["timestamp"] = datetime.now().isoformat()
             meta.attrs["success"] = success
             meta.attrs["episode_length"] = n_steps
+
+            # Add format metadata for single-arm vs bimanual
+            if self.single_arm is not None:
+                meta.attrs["arm_idx"] = self.single_arm
+                meta.attrs["format"] = "single_arm"
+            else:
+                meta.attrs["format"] = "bimanual"
 
             # Observations
             obs_grp = f.create_group("observations")

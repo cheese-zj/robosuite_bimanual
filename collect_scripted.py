@@ -35,6 +35,8 @@ def run_scripted_collection(
     cloth_noise: bool = False,
     robot_noise: bool = False,
     use_cv2: bool = False,
+    single_arm: Optional[int] = None,
+    randomize_cloth: bool = False,
 ):
     if policy_name is None:
         policy_name = "cloth_fold" if two_arm_cloth or "Cloth" in task else "lift"
@@ -82,6 +84,11 @@ def run_scripted_collection(
         from envs.two_arm_cloth_fold import TwoArmClothFold
 
         robots_list = [robot, robot] if isinstance(robot, str) else robot
+
+        # If randomize_cloth is set, enable both position and rotation noise
+        effective_cloth_noise = cloth_noise or randomize_cloth
+        effective_rotation_noise = randomize_cloth
+
         env = TwoArmClothFold(
             robots=robots_list,
             env_configuration=env_configuration,
@@ -93,7 +100,10 @@ def run_scripted_collection(
             render_camera="bimanual_view",
             horizon=max_steps or 500,
             cloth_preset=cloth_preset,
-            cloth_noise=cloth_noise,
+            cloth_noise=effective_cloth_noise,
+            cloth_noise_std=0.05,  # 5cm as per requirement
+            cloth_rotation_noise=effective_rotation_noise,
+            cloth_rotation_noise_max=0.2618,  # ~15 degrees
             robot_noise=robot_noise,
         )
     else:
@@ -113,7 +123,7 @@ def run_scripted_collection(
         print("\n[Demo Mode] Running without data collection. Close window to exit.\n")
     else:
         collector = BimanualDataCollector(
-            env, save_dir=save_dir, camera_names=camera_list
+            env, save_dir=save_dir, camera_names=camera_list, single_arm=single_arm
         )
 
     for episode in range(num_episodes):
@@ -230,6 +240,19 @@ def main():
         action="store_true",
         help="Use OpenCV for rendering (workaround for macOS mjpython issue)",
     )
+    parser.add_argument(
+        "--single_arm",
+        type=int,
+        choices=[0, 1],
+        default=None,
+        help="Record only one arm's data (0=left/bottom, 1=right/top). "
+        "Both arms still move during execution.",
+    )
+    parser.add_argument(
+        "--randomize_cloth",
+        action="store_true",
+        help="Enable cloth position (+-5cm) and rotation (+-15deg) randomization",
+    )
 
     args = parser.parse_args()
 
@@ -252,6 +275,8 @@ def main():
         cloth_noise=args.cloth_noise,
         robot_noise=args.robot_noise,
         use_cv2=args.cv2,
+        single_arm=args.single_arm,
+        randomize_cloth=args.randomize_cloth,
     )
 
 
